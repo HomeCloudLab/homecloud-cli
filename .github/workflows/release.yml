@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build-${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-amd64
+            script: bash scripts/build-binary.sh
+          - os: macos-13
+            target: darwin-amd64
+            script: bash scripts/build-binary.sh
+          - os: macos-latest
+            target: darwin-arm64
+            script: bash scripts/build-binary.sh
+          - os: windows-latest
+            target: windows-amd64
+            script: powershell -File scripts/build-binary.ps1
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: homecloud-cli
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/homecloud-sdk
+          path: homecloud-sdk
+        continue-on-error: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build binary
+        working-directory: homecloud-cli
+        env:
+          HOMECLOUD_SDK_ROOT: ${{ github.workspace }}/homecloud-sdk
+        run: ${{ matrix.script }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            homecloud-cli/dist/homecloud-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+          generate_release_notes: true
+
+      - name: Upload to S3 (optional)
+        if: env.HOMECLOUD_S3_ENDPOINT != ''
+        env:
+          HOMECLOUD_S3_ENDPOINT: ${{ secrets.HOMECLOUD_S3_ENDPOINT }}
+          MINIO_ACCESS_KEY: ${{ secrets.HOMECLOUD_CLI_S3_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.HOMECLOUD_CLI_S3_SECRET_KEY }}
+          HOMECLOUD_CLI_BUCKET: ${{ vars.HOMECLOUD_CLI_BUCKET || 'homecloud-cli' }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc
+          chmod +x mc
+          sudo mv mc /usr/local/bin/
+          for f in artifacts/homecloud-*; do
+            base="$(basename "$f")"
+            [[ "$base" == *.sha256 ]] && continue
+            mc alias set hc "$HOMECLOUD_S3_ENDPOINT" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY"
+            mc cp "$f" "hc/${HOMECLOUD_CLI_BUCKET}/releases/v${VERSION}/${base}"
+            mc cp "$f" "hc/${HOMECLOUD_CLI_BUCKET}/releases/latest/${base}"
+          done

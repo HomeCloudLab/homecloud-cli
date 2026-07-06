@@ -6,3 +6,6 @@ dist/
 build/
 .pytest_cache/
 .ruff_cache/
+homecloud-windows-amd64.exe
+homecloud-linux-*
+homecloud-darwin-*

@@ -1,70 +1,40 @@
 # homecloud-cli
 
-Command-line interface for the HomeCloud platform.
+Thin command-line wrapper over `homecloud-sdk`, distributed as a **single binary** (no Python required for end users).
 
-## Install
+## End users — install
 
 ```bash
-pip install -e .
+curl -sSL https://install.homecloud.dev | bash
 ```
 
-## Quick start
-
-1. Create an Access Key in the Console (IAM → Access Keys) and download the credentials JSON.
-2. Configure the CLI:
-
 ```bash
+homecloud version
 homecloud configure
-# or import the file from the Console:
-homecloud configure import ~/.homecloud/credentials.json
-```
-
-3. List queues (requires console login or saved session token):
-
-```bash
 homecloud login
-homecloud queues list
+homecloud apps list
+homecloud mq send orders --body '{"id": 1}'
 ```
 
-4. Send/receive messages on the MQ data plane (uses Access Key signing):
+See [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for release pipeline and storage layout.
+
+## Developers — source install
 
 ```bash
-homecloud mq send my-queue --body '{"hello":"world"}'
-homecloud mq receive my-queue
-```
-
-## Configuration
-
-Credentials are stored at `~/.homecloud/credentials` (mode `0600`).
-
-The file supports multiple profiles:
-
-```json
-{
-  "version": 1,
-  "default_profile": "default",
-  "profiles": {
-    "default": {
-      "console_url": "https://console.holab.abrdns.com/api/v1",
-      "mq_url": "https://mq.holab.abrdns.com",
-      "default_account_id": "00000000-0000-0000-0000-000000000000",
-      "access_key_id": "HCAK...",
-      "secret_access_key": "..."
-    }
-  }
-}
-```
-
-The flat format exported by the Console UI is also accepted.
-
-## Global options
-
-- `--profile NAME` — use a named profile (default: `default`)
-- `--output table|json|yaml` — output format (default: `table`)
-
-## Development
-
-```bash
+pip install -e ../homecloud-sdk
 pip install -e ".[dev]"
 pytest tests/ -q
 ```
+
+## Build standalone binary
+
+```bash
+pip install -e ../homecloud-sdk -e ".[build]"
+./scripts/build-binary.sh    # Linux/macOS
+# or
+.\scripts\build-binary.ps1  # Windows
+```
+
+## What CLI does NOT contain
+
+HTTP, auth, signing, account resolution, or endpoint routing — all in `homecloud-sdk` → `homecloud_core`.

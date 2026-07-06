@@ -2,17 +2,33 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, master]
   push:
-    branches: [main, dev]
+    branches: [main, dev, master]
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: homecloud-cli
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: homecloud-cli
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/homecloud-sdk
+          path: homecloud-sdk
+          ref: main
+        continue-on-error: true
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - name: Install dependencies
+        run: |
+          if [ -d ../homecloud-sdk ]; then
+            pip install -e ../homecloud-sdk
+          fi
+          pip install -e ".[dev]"
       - run: pytest tests/ -q

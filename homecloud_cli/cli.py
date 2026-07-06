@@ -1,4 +1,4 @@
-"""Typer CLI entry point."""
+"""Typer CLI — thin wrapper over homecloud_sdk."""
 
 from __future__ import annotations
 
@@ -7,40 +7,35 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
+from homecloud_core.defaults import DEFAULT_PROFILE
+from homecloud_core.errors import HomeCloudError
+from homecloud_sdk import HomeCloudClient
 
 from homecloud_cli import __version__
-from homecloud_cli.client import ConsoleClient, HomeCloudError, MqClient
-from homecloud_cli.config import (
-    DEFAULT_CONSOLE_URL,
-    DEFAULT_MQ_URL,
-    DEFAULT_PROFILE,
-    Profile,
-    credentials_path,
-    load_credentials,
-    mask_secret,
-    upsert_profile,
-)
 from homecloud_cli.output import emit
 
-app = typer.Typer(
-    no_args_is_help=True,
-    help="HomeCloud command-line interface",
-)
-configure_app = typer.Typer(help="Manage credentials and profiles")
+app = typer.Typer(no_args_is_help=True, help="HomeCloud command-line interface")
+configure_app = typer.Typer(help="Set up Access Keys and profiles")
 config_app = typer.Typer(help="Show current configuration")
 accounts_app = typer.Typer(help="Account commands")
-queues_app = typer.Typer(help="Queue commands (console API)")
-mq_app = typer.Typer(help="MQ data plane commands (Access Key)")
+apps_app = typer.Typer(help="Application commands")
+queues_app = typer.Typer(help="Queue commands")
+mq_app = typer.Typer(help="Message queue commands")
 
 app.add_typer(configure_app, name="configure")
 app.add_typer(config_app, name="config")
 app.add_typer(accounts_app, name="accounts")
+app.add_typer(apps_app, name="apps")
 app.add_typer(queues_app, name="queues")
 app.add_typer(mq_app, name="mq")
 
 
-def _profile_option(profile: Optional[str]) -> str:
-    return profile or DEFAULT_PROFILE
+def _profile_option(profile: Optional[str]) -> str | None:
+    return profile
+
+
+def _client(profile: Optional[str]) -> HomeCloudClient:
+    return HomeCloudClient(profile=profile)
 
 
 def _output_option(output: str) -> str:
@@ -50,15 +45,29 @@ def _output_option(output: str) -> str:
     return normalized
 
 
-def _load_profile(profile_name: Optional[str]) -> Profile:
-    credentials = load_credentials()
-    return credentials.get_profile(_profile_option(profile_name))
+def _handle_error(exc: Exception) -> None:
+    typer.secho(str(exc), fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=1) from exc
 
 
 def version_callback(value: bool) -> None:
     if value:
-        typer.echo(__version__)
+        typer.echo(_version_line())
         raise typer.Exit()
+
+
+def _version_line() -> str:
+    import platform
+    import sys
+
+    runtime = "standalone" if getattr(sys, "frozen", False) else "source"
+    return f"homecloud {__version__} ({platform.system().lower()}-{platform.machine()}, {runtime})"
+
+
+@app.command("version")
+def version_cmd() -> None:
+    """Show CLI version and build metadata."""
+    typer.echo(_version_line())
 
 
 @app.callback()
@@ -72,8 +81,12 @@ def main_callback(
             is_eager=True,
         ),
     ] = False,
+    profile: Annotated[Optional[str], typer.Option(help="Configuration profile")] = None,
 ) -> None:
-    pass
+    if profile:
+        import os
+
+        os.environ["HOMECLOUD_PROFILE"] = profile
 
 
 @configure_app.callback(invoke_without_command=True)
@@ -84,46 +97,29 @@ def configure_wizard(
     if ctx.invoked_subcommand is not None:
         return
 
-    profile_name = _profile_option(profile)
+    profile_name = profile or DEFAULT_PROFILE
     typer.echo(f"Configuring profile: {profile_name}")
 
-    console_url = typer.prompt("Console API URL", default=DEFAULT_CONSOLE_URL)
-    mq_url = typer.prompt("MQ data plane URL", default=DEFAULT_MQ_URL)
-    account_id = typer.prompt("Default account ID")
     access_key_id = typer.prompt("Access Key ID")
     secret_access_key = typer.prompt("Secret Access Key", hide_input=True)
 
-    saved = upsert_profile(
-        Profile(
-            name=profile_name,
-            console_url=console_url,
-            mq_url=mq_url,
-            default_account_id=account_id,
-            access_key_id=access_key_id,
-            secret_access_key=secret_access_key,
-        )
+    client = HomeCloudClient(profile=profile_name)
+    client.configure(
+        access_key_id=access_key_id,
+        secret_access_key=secret_access_key,
     )
-    typer.echo(f"Saved credentials to {saved}")
+    typer.echo("Configuration saved.")
 
 
 @configure_app.command("import")
 def configure_import(
-    file: Annotated[Path, typer.Argument(help="Credentials JSON from Console UI")],
+    file: Annotated[Path, typer.Argument(help="Credentials JSON from Console")],
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
 ) -> None:
     raw = json.loads(file.read_text(encoding="utf-8"))
-    profile_name = _profile_option(profile)
-
-    profile_data = Profile(
-        name=profile_name,
-        console_url=raw.get("console_url", DEFAULT_CONSOLE_URL),
-        mq_url=raw.get("mq_url", DEFAULT_MQ_URL),
-        default_account_id=raw.get("default_account_id"),
-        access_key_id=raw.get("access_key_id"),
-        secret_access_key=raw.get("secret_access_key"),
-    )
-    saved = upsert_profile(profile_data)
-    typer.echo(f"Imported credentials into {saved} (profile: {profile_name})")
+    client = HomeCloudClient(profile=profile or DEFAULT_PROFILE)
+    client.import_credentials(raw)
+    typer.echo("Credentials imported.")
 
 
 @config_app.command("show")
@@ -131,43 +127,28 @@ def config_show(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "table",
 ) -> None:
-    credentials = load_credentials()
-    active = credentials.get_profile(_profile_option(profile))
-    data = {
-        "credentials_file": str(credentials_path()),
-        "default_profile": credentials.default_profile,
-        "profile": active.name,
-        "console_url": active.console_url,
-        "mq_url": active.mq_url,
-        "default_account_id": active.default_account_id,
-        "access_key_id": active.access_key_id,
-        "secret_access_key": mask_secret(active.secret_access_key),
-        "logged_in": bool(active.access_token),
-    }
-    emit(data, output_format=_output_option(output))
+    try:
+        summary = _client(profile).config_summary()
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(summary, output_format=_output_option(output))
 
 
 @app.command("login")
 def login(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
-    email: Annotated[Optional[str], typer.Option(help="Console email")] = None,
-    password: Annotated[Optional[str], typer.Option(help="Console password", hide_input=True)] = None,
+    email: Annotated[Optional[str], typer.Option(help="Email")] = None,
+    password: Annotated[Optional[str], typer.Option(help="Password", hide_input=True)] = None,
 ) -> None:
-    profile_name = _profile_option(profile)
-    active = _load_profile(profile_name)
-    email_value = email or typer.prompt("Email")
-    password_value = password or typer.prompt("Password", hide_input=True)
-
-    client = ConsoleClient(active)
+    client = _client(profile)
     try:
-        token = client.login(email_value, password_value)
+        client.login(
+            email or typer.prompt("Email"),
+            password or typer.prompt("Password", hide_input=True),
+        )
     except HomeCloudError as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
-
-    active.access_token = token
-    upsert_profile(active, make_default=profile_name == DEFAULT_PROFILE)
-    typer.echo(f"Logged in (profile: {profile_name})")
+        _handle_error(exc)
+    typer.echo("Logged in.")
 
 
 @accounts_app.command("list")
@@ -175,45 +156,47 @@ def accounts_list(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "table",
 ) -> None:
-    active = _load_profile(profile)
-    client = ConsoleClient(active)
     try:
-        items = client.list_accounts()
-    except (HomeCloudError, ValueError) as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
+        items = _client(profile).accounts.list()
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(items, output_format=_output_option(output), columns=["name", "slug", "status"])
 
-    emit(
-        items,
-        output_format=_output_option(output),
-        columns=["id", "name", "slug", "status"],
-    )
+
+@accounts_app.command("switch")
+def accounts_switch(
+    account_ref: Annotated[str, typer.Argument(help="Account name or slug")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    try:
+        _client(profile).accounts.switch(account_ref)
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    typer.echo(f"Switched to account: {account_ref}")
+
+
+@apps_app.command("list")
+def apps_list(
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format")] = "table",
+) -> None:
+    try:
+        items = _client(profile).apps.list()
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(items, output_format=_output_option(output), columns=["name", "slug", "status"])
 
 
 @queues_app.command("list")
 def queues_list(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
-    account_id: Annotated[Optional[str], typer.Option(help="Account ID override")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "table",
 ) -> None:
-    active = _load_profile(profile)
-    account = account_id or active.default_account_id
-    if not account:
-        typer.secho("default_account_id is required", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-
-    client = ConsoleClient(active)
     try:
-        items = client.list_queues(account)
-    except (HomeCloudError, ValueError) as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
-
-    emit(
-        items,
-        output_format=_output_option(output),
-        columns=["name", "status", "provider", "resource_type"],
-    )
+        items = _client(profile).queues.list()
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(items, output_format=_output_option(output), columns=["name", "status"])
 
 
 @mq_app.command("send")
@@ -223,15 +206,11 @@ def mq_send(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "json",
 ) -> None:
-    active = _load_profile(profile)
-    client = MqClient(active)
     try:
         payload = json.loads(body)
-        result = client.send_message(queue_name, body=payload)
-    except (HomeCloudError, ValueError, json.JSONDecodeError) as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
-
+        result = _client(profile).mq.send(queue_name, payload)
+    except (HomeCloudError, FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        _handle_error(exc)
     emit(result, output_format=_output_option(output))
 
 
@@ -243,18 +222,14 @@ def mq_receive(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "json",
 ) -> None:
-    active = _load_profile(profile)
-    client = MqClient(active)
     try:
-        items = client.receive_messages(
+        items = _client(profile).mq.receive(
             queue_name,
             max_messages=max_messages,
             wait_seconds=wait_seconds,
         )
-    except (HomeCloudError, ValueError) as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
-
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
     emit(items, output_format=_output_option(output))
 
 
