@@ -4,9 +4,19 @@ Thin command-line wrapper over `homecloud-sdk`, distributed as a **single binary
 
 ## End users — install
 
+**Linux / macOS:**
+
 ```bash
-curl -sSL https://install.homecloud.dev | bash
+curl -fsSL https://homecloud-cli.so.holab.abrdns.com/install/install.sh | bash
 ```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://homecloud-cli.so.holab.abrdns.com/install/install.ps1 | iex
+```
+
+Direct binary URLs: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md)
 
 ```bash
 homecloud version
@@ -14,9 +24,10 @@ homecloud configure
 homecloud login
 homecloud apps list
 homecloud mq send orders --body '{"id": 1}'
+homecloud so ls my-bucket
 ```
 
-See [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for release pipeline and storage layout.
+See [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for release pipeline and [docs/SMOKE_TEST.md](docs/SMOKE_TEST.md) for E2E verification.
 
 ## Developers — source install
 

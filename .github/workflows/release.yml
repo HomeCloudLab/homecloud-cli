@@ -51,6 +51,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -96,6 +98,10 @@ jobs:
           echo "${VERSION}" | mc pipe "hc/${BUCKET}/releases/latest/VERSION"
           echo "${VERSION}" | mc pipe "hc/${BUCKET}/releases/v${VERSION}/VERSION"
 
+          mc cp install/install.sh "hc/${BUCKET}/install/install.sh"
+          mc cp install/install.ps1 "hc/${BUCKET}/install/install.ps1"
+
           echo "Public downloads:"
           echo "  ${HOMECLOUD_CLI_PUBLIC_BASE}/latest/homecloud-linux-amd64"
           echo "  ${HOMECLOUD_CLI_PUBLIC_BASE}/v${VERSION}/homecloud-linux-amd64"
+          echo "  https://homecloud-cli.so.holab.abrdns.com/install/install.sh"

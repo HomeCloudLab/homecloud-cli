@@ -22,12 +22,15 @@ apps_app = typer.Typer(help="Application commands")
 queues_app = typer.Typer(help="Queue commands")
 mq_app = typer.Typer(help="Message queue commands")
 
+so_app = typer.Typer(help="Object storage commands")
+
 app.add_typer(configure_app, name="configure")
 app.add_typer(config_app, name="config")
 app.add_typer(accounts_app, name="accounts")
 app.add_typer(apps_app, name="apps")
 app.add_typer(queues_app, name="queues")
 app.add_typer(mq_app, name="mq")
+app.add_typer(so_app, name="so")
 
 
 def _profile_option(profile: Optional[str]) -> str | None:
@@ -231,6 +234,74 @@ def mq_receive(
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(items, output_format=_output_option(output))
+
+
+@so_app.command("ls-buckets")
+def so_ls_buckets(
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format")] = "table",
+) -> None:
+    """List storage buckets (console API — requires login)."""
+    try:
+        items = _client(profile).storage.list_buckets()
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(items, output_format=_output_option(output), columns=["name", "status"])
+
+
+@so_app.command("ls")
+def so_ls(
+    bucket: Annotated[str, typer.Argument(help="Bucket name")],
+    prefix: Annotated[str, typer.Option(help="Object key prefix")] = "",
+    recursive: Annotated[bool, typer.Option(help="List recursively")] = False,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format")] = "table",
+) -> None:
+    """List objects in a bucket (data plane — Access Key)."""
+    try:
+        data = _client(profile).storage.list_objects(bucket, prefix=prefix, recursive=recursive)
+        items = data.get("items", [])
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(items, output_format=_output_option(output), columns=["key", "size", "last_modified"])
+
+
+@so_app.command("cp")
+def so_cp(
+    local_path: Annotated[Path, typer.Argument(help="Local file path")],
+    destination: Annotated[str, typer.Argument(help="s3://bucket/key or bucket/key")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format")] = "json",
+) -> None:
+    """Upload a file to a bucket (data plane — Access Key)."""
+    dest = destination.removeprefix("s3://")
+    parts = dest.split("/", 1)
+    if len(parts) != 2:
+        raise typer.BadParameter("destination must be bucket/key or s3://bucket/key")
+    bucket_name, object_key = parts[0], parts[1]
+    try:
+        result = _client(profile).storage.upload(bucket_name, local_path.as_posix(), key=object_key)
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(result, output_format=_output_option(output))
+
+
+@so_app.command("rm")
+def so_rm(
+    uri: Annotated[str, typer.Argument(help="s3://bucket/key or bucket/key")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    """Delete an object (data plane — Access Key)."""
+    target = uri.removeprefix("s3://")
+    parts = target.split("/", 1)
+    if len(parts) != 2:
+        raise typer.BadParameter("uri must be bucket/key or s3://bucket/key")
+    bucket_name, object_key = parts[0], parts[1]
+    try:
+        _client(profile).storage.delete(bucket_name, object_key)
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    typer.echo(f"Deleted s3://{bucket_name}/{object_key}")
 
 
 def main() -> None:

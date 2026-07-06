@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HomeCloud CLI installer — curl -sSL https://install.homecloud.dev | bash
+# HomeCloud CLI installer — curl -fsSL https://homecloud-cli.so.holab.abrdns.com/install/install.sh | bash
 set -euo pipefail
 
 INSTALL_BASE="${HOMECLOUD_INSTALL_URL:-https://homecloud-cli.so.holab.abrdns.com/releases}"

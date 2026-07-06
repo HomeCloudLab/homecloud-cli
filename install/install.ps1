@@ -1,5 +1,5 @@
 # HomeCloud CLI installer for Windows (amd64).
-# Usage: irm https://install.homecloud.dev/windows | iex
+# Usage: irm https://homecloud-cli.so.holab.abrdns.com/install/install.ps1 | iex
 $ErrorActionPreference = "Stop"
 
 $InstallBase = if ($env:HOMECLOUD_INSTALL_URL) { $env:HOMECLOUD_INSTALL_URL } else { "https://homecloud-cli.so.holab.abrdns.com/releases" }

@@ -11,16 +11,19 @@ sudo mv homecloud /usr/local/bin/
 homecloud version
 ```
 
-Or use the installer script from this repo (`install/install.sh`).
+Or one-liner install:
+
+```bash
+curl -fsSL https://homecloud-cli.so.holab.abrdns.com/install/install.sh | bash
+```
 
 Windows:
 
 ```powershell
-$url = "https://homecloud-cli.so.holab.abrdns.com/releases/latest/homecloud-windows-amd64.exe"
-Invoke-WebRequest $url -OutFile "$env:LOCALAPPDATA\Programs\homecloud\homecloud.exe"
+irm https://homecloud-cli.so.holab.abrdns.com/install/install.ps1 | iex
 ```
 
-## Direct download URLs
+Or download the binary directly:
 
 ```text
 https://homecloud-cli.so.holab.abrdns.com/releases/latest/homecloud-linux-amd64

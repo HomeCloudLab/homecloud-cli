@@ -62,6 +62,8 @@ class Transport:
         *,
         json: Any | None = None,
         params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
     ) -> Any:
         if not self.access_key_id or not self.secret_access_key:
             raise HomeCloudError("Access Key not configured. Run: homecloud configure")
@@ -80,7 +82,15 @@ class Transport:
             account_id=account_id,
         )
         url = f"{base.rstrip('/')}{path}"
-        return self._request(method, url, headers=headers, json=json, params=params)
+        return self._request(
+            method,
+            url,
+            headers=headers,
+            json=json,
+            params=params,
+            data=data,
+            files=files,
+        )
 
     def _request(
         self,
@@ -90,11 +100,21 @@ class Transport:
         headers: dict[str, str],
         json: Any | None = None,
         params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
     ) -> Any:
         last_error: HomeCloudError | None = None
         for attempt in range(_MAX_RETRIES + 1):
             with httpx.Client(timeout=self.timeout) as client:
-                response = client.request(method, url, headers=headers, json=json, params=params)
+                response = client.request(
+                    method,
+                    url,
+                    headers=headers,
+                    json=json,
+                    params=params,
+                    data=data,
+                    files=files,
+                )
             if response.status_code not in _RETRY_STATUS or attempt == _MAX_RETRIES:
                 return self._parse(response)
             last_error = HomeCloudError(
