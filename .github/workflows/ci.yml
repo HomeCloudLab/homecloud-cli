@@ -9,23 +9,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: homecloud-cli
     steps:
       - uses: actions/checkout@v4
         with:
-          path: homecloud-cli
+          submodules: recursive
+          token: ${{ secrets.HOMECLOUD_SDK_CHECKOUT_TOKEN || github.token }}
 
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/homecloud-sdk
-          path: homecloud-sdk
-          ref: master
-          # If checkout fails on a private repo, add secret HOMECLOUD_SDK_CHECKOUT_TOKEN (PAT with repo read).
-          token: ${{ secrets.HOMECLOUD_SDK_CHECKOUT_TOKEN }}
-
-      - name: Verify homecloud-sdk checkout
+      - name: Verify homecloud-sdk
         run: test -f homecloud-sdk/pyproject.toml
 
       - uses: actions/setup-python@v5
@@ -34,7 +24,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e "${{ github.workspace }}/homecloud-sdk"
+          pip install -e ./homecloud-sdk
           pip install -e ".[dev]"
 
       - run: pytest tests/ -q

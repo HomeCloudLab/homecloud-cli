@@ -3,14 +3,27 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SDK_ROOT="${HOMECLOUD_SDK_ROOT:-$(cd "${ROOT}/../homecloud-sdk" 2>/dev/null && pwd || true)}"
 DIST="${ROOT}/dist"
 VERSION="$(python -c "import importlib.util; spec=importlib.util.spec_from_file_location('v','${ROOT}/homecloud_cli/__init__.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(m.__version__)")"
 
-if [[ -z "${SDK_ROOT}" || ! -f "${SDK_ROOT}/pyproject.toml" ]]; then
-  echo "homecloud-sdk not found. Set HOMECLOUD_SDK_ROOT or place it beside homecloud-cli." >&2
+resolve_sdk_root() {
+  if [[ -n "${HOMECLOUD_SDK_ROOT:-}" && -f "${HOMECLOUD_SDK_ROOT}/pyproject.toml" ]]; then
+    echo "${HOMECLOUD_SDK_ROOT}"
+    return
+  fi
+  for candidate in "${ROOT}/homecloud-sdk" "${ROOT}/../homecloud-sdk"; do
+    if [[ -f "${candidate}/pyproject.toml" ]]; then
+      echo "${candidate}"
+      return
+    fi
+  done
+  return 1
+}
+
+SDK_ROOT="$(resolve_sdk_root)" || {
+  echo "homecloud-sdk not found. Expected submodule at ${ROOT}/homecloud-sdk or set HOMECLOUD_SDK_ROOT." >&2
   exit 1
-fi
+}
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
@@ -30,7 +43,7 @@ if [[ "${OS}" == "darwin" ]]; then
   ARTIFACT="homecloud-darwin-${ARCH}"
 fi
 
-echo "Building ${ARTIFACT} (v${VERSION})..."
+echo "Building ${ARTIFACT} (v${VERSION}) using SDK at ${SDK_ROOT}..."
 
 export HOMECLOUD_SDK_ROOT="${SDK_ROOT}"
 python -m pip install -q -e "${SDK_ROOT}" -e "${ROOT}[build]"

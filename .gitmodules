@@ -1,0 +1,3 @@
+[submodule "homecloud-sdk"]
+	path = homecloud-sdk
+	url = https://github.com/HomeCloudLab/homecloud-sdk.git

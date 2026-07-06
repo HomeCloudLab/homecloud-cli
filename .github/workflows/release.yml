@@ -32,16 +32,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: homecloud-cli
+          submodules: recursive
+          token: ${{ secrets.HOMECLOUD_SDK_CHECKOUT_TOKEN || github.token }}
 
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/homecloud-sdk
-          path: homecloud-sdk
-          ref: master
-          token: ${{ secrets.HOMECLOUD_SDK_CHECKOUT_TOKEN }}
-
-      - name: Verify homecloud-sdk checkout
+      - name: Verify homecloud-sdk
         run: test -f homecloud-sdk/pyproject.toml
 
       - uses: actions/setup-python@v5
@@ -49,7 +43,6 @@ jobs:
           python-version: "3.12"
 
       - name: Build binary
-        working-directory: homecloud-cli
         env:
           HOMECLOUD_SDK_ROOT: ${{ github.workspace }}/homecloud-sdk
         run: ${{ matrix.script }}
@@ -58,8 +51,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: |
-            homecloud-cli/dist/homecloud-*
+          path: dist/homecloud-*
 
   release:
     needs: build
@@ -79,7 +71,6 @@ jobs:
           files: artifacts/**
           generate_release_notes: true
 
-      # Optional — skipped entirely when HOMECLOUD_S3_ENDPOINT secret is empty.
       - name: Upload to S3
         if: ${{ secrets.HOMECLOUD_S3_ENDPOINT != '' }}
         env:

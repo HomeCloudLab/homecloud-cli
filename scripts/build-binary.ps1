@@ -2,16 +2,28 @@
 $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$SdkRoot = if ($env:HOMECLOUD_SDK_ROOT) { $env:HOMECLOUD_SDK_ROOT } else { Join-Path (Split-Path $Root -Parent) "homecloud-sdk" }
 $Dist = Join-Path $Root "dist"
 $Version = (Get-Content (Join-Path $Root "homecloud_cli\__init__.py") | Select-String '__version__ = "(.+)"').Matches.Groups[1].Value
 $Artifact = "homecloud-windows-amd64.exe"
 
-if (-not (Test-Path (Join-Path $SdkRoot "pyproject.toml"))) {
-    throw "homecloud-sdk not found at $SdkRoot"
+function Resolve-SdkRoot {
+    if ($env:HOMECLOUD_SDK_ROOT -and (Test-Path (Join-Path $env:HOMECLOUD_SDK_ROOT "pyproject.toml"))) {
+        return $env:HOMECLOUD_SDK_ROOT
+    }
+    foreach ($candidate in @(
+            (Join-Path $Root "homecloud-sdk"),
+            (Join-Path (Split-Path $Root -Parent) "homecloud-sdk")
+        )) {
+        if (Test-Path (Join-Path $candidate "pyproject.toml")) {
+            return $candidate
+        }
+    }
+    throw "homecloud-sdk not found. Expected submodule at $(Join-Path $Root 'homecloud-sdk') or set HOMECLOUD_SDK_ROOT."
 }
 
-Write-Host "Building $Artifact (v$Version)..."
+$SdkRoot = Resolve-SdkRoot
+
+Write-Host "Building $Artifact (v$Version) using SDK at $SdkRoot..."
 
 $env:HOMECLOUD_SDK_ROOT = $SdkRoot
 python -m pip install -q -e $SdkRoot -e "${Root}[build]"
