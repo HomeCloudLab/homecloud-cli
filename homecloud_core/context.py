@@ -56,11 +56,11 @@ class CoreContext:
         remember_account(self.profile_name, account_id)
         return account_id
 
-    def login(self, email: str, password: str) -> None:
+    def login(self, username: str, password: str) -> None:
         data = self._transport.console_request(
             "POST",
             "auth/login",
-            json={"email": email, "password": password},
+            json={"username": username, "password": password},
             require_auth=False,
         )
         token = data.get("access_token")

@@ -42,8 +42,8 @@ class HomeCloudClient:
     def secrets(self) -> SecretsAPI:
         return SecretsAPI(self._ctx)
 
-    def login(self, email: str, password: str) -> None:
-        self._ctx.login(email, password)
+    def login(self, username: str, password: str) -> None:
+        self._ctx.login(username, password)
 
     def configure(
         self,

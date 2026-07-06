@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 import typer
 from homecloud_core.defaults import DEFAULT_PROFILE
@@ -48,8 +49,56 @@ def _output_option(output: str) -> str:
     return normalized
 
 
+def _repair_powershell_json(raw: str) -> str:
+    """Quote bare keys/values when PowerShell strips JSON double quotes from argv."""
+    inner = raw.strip()
+    if not (inner.startswith("{") and inner.endswith("}")):
+        return inner
+    inner = re.sub(r"([{,]\s*)([A-Za-z_][\w-]*)(\s*:)", r'\1"\2"\3', inner)
+    inner = re.sub(r'(:\s*)([A-Za-z_][\w-]*)(\s*[,}])', r'\1"\2"\3', inner)
+    return inner
+
+
+def _parse_mq_body(raw: str) -> dict[str, Any]:
+    last_exc: json.JSONDecodeError | None = None
+    for candidate in (raw, _repair_powershell_json(raw)):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_exc = exc
+            continue
+        if not isinstance(parsed, dict):
+            raise typer.BadParameter("--body must be a JSON object")
+        return parsed
+    assert last_exc is not None
+    raise last_exc
+
+
+def _load_mq_body(body: str, body_file: Path | None) -> dict[str, Any]:
+    if body_file is not None:
+        return _parse_mq_body(body_file.read_text(encoding="utf-8"))
+    return _parse_mq_body(body)
+
+
+def _format_error(exc: Exception) -> str:
+    if isinstance(exc, json.JSONDecodeError):
+        return (
+            f"Invalid JSON in --body: {exc.msg}\n"
+            'PowerShell: --body "{`"hello`":`"world`"}"  '
+            'or --body ''{"hello":"world"}'''
+        )
+    if isinstance(exc, HomeCloudError):
+        if exc.status_code == 404 and isinstance(exc.detail, str):
+            return exc.detail
+        if exc.detail is not None and exc.detail != str(exc):
+            if isinstance(exc.detail, str):
+                return exc.detail
+            return f"{exc} — {exc.detail}"
+    return str(exc)
+
+
 def _handle_error(exc: Exception) -> None:
-    typer.secho(str(exc), fg=typer.colors.RED, err=True)
+    typer.secho(_format_error(exc), fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1) from exc
 
 
@@ -140,13 +189,13 @@ def config_show(
 @app.command("login")
 def login(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
-    email: Annotated[Optional[str], typer.Option(help="Email")] = None,
+    username: Annotated[Optional[str], typer.Option(help="Console username")] = None,
     password: Annotated[Optional[str], typer.Option(help="Password", hide_input=True)] = None,
 ) -> None:
     client = _client(profile)
     try:
         client.login(
-            email or typer.prompt("Email"),
+            username or typer.prompt("Username"),
             password or typer.prompt("Password", hide_input=True),
         )
     except HomeCloudError as exc:
@@ -206,13 +255,28 @@ def queues_list(
 def mq_send(
     queue_name: Annotated[str, typer.Argument(help="Queue name")],
     body: Annotated[str, typer.Option(help="JSON message body")] = "{}",
+    body_file: Annotated[
+        Optional[Path],
+        typer.Option("--body-file", help="Read JSON message body from a file", exists=True, readable=True),
+    ] = None,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "json",
 ) -> None:
     try:
-        payload = json.loads(body)
+        payload = _load_mq_body(body, body_file)
         result = _client(profile).mq.send(queue_name, payload)
-    except (HomeCloudError, FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+    except json.JSONDecodeError as exc:
+        _handle_error(exc)
+    except HomeCloudError as exc:
+        if exc.status_code == 404 and exc.detail == "Queue not found":
+            _handle_error(
+                HomeCloudError(
+                    f"Queue '{queue_name}' not found. "
+                    "Create it in the console (Queues) or check the name with: homecloud queues list"
+                )
+            )
+        _handle_error(exc)
+    except (FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(result, output_format=_output_option(output))
 
@@ -231,7 +295,16 @@ def mq_receive(
             max_messages=max_messages,
             wait_seconds=wait_seconds,
         )
-    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+    except HomeCloudError as exc:
+        if exc.status_code == 404 and exc.detail == "Queue not found":
+            _handle_error(
+                HomeCloudError(
+                    f"Queue '{queue_name}' not found. "
+                    "Create it in the console (Queues) or check the name with: homecloud queues list"
+                )
+            )
+        _handle_error(exc)
+    except (FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(items, output_format=_output_option(output))
 
