@@ -20,8 +20,11 @@ See [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for release pipeline and storag
 
 ## Developers — source install
 
+SDK core (`homecloud_core`, `homecloud_sdk`) is **vendored in this repo** for standalone binary builds (no cross-repo checkout in CI).
+
+Sync from `homecloud-sdk` when updating core logic, then commit here.
+
 ```bash
-pip install -e ../homecloud-sdk
 pip install -e ".[dev]"
 pytest tests/ -q
 ```

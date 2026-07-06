@@ -31,20 +31,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          token: ${{ secrets.HOMECLOUD_SDK_CHECKOUT_TOKEN || github.token }}
-
-      - name: Verify homecloud-sdk
-        run: test -f homecloud-sdk/pyproject.toml
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Build binary
-        env:
-          HOMECLOUD_SDK_ROOT: ${{ github.workspace }}/homecloud-sdk
         run: ${{ matrix.script }}
 
       - name: Upload artifact

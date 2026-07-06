@@ -8,7 +8,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 ROOT = Path(SPECPATH)
-SDK_ROOT = Path(os.environ.get("HOMECLOUD_SDK_ROOT", ROOT.parent / "homecloud-sdk"))
+SDK_ROOT = Path(os.environ.get("HOMECLOUD_SDK_ROOT", ROOT))
 
 datas = []
 binaries = []
