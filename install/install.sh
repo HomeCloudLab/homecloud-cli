@@ -2,7 +2,7 @@
 # HomeCloud CLI installer — curl -sSL https://install.homecloud.dev | bash
 set -euo pipefail
 
-INSTALL_BASE="${HOMECLOUD_INSTALL_URL:-https://cli.homecloud.dev/releases}"
+INSTALL_BASE="${HOMECLOUD_INSTALL_URL:-https://homecloud-cli.so.holab.abrdns.com/releases}"
 VERSION="${HOMECLOUD_VERSION:-latest}"
 INSTALL_DIR="${HOMECLOUD_INSTALL_DIR:-/usr/local/bin}"
 BINARY_NAME="homecloud"

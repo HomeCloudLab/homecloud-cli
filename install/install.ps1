@@ -2,7 +2,7 @@
 # Usage: irm https://install.homecloud.dev/windows | iex
 $ErrorActionPreference = "Stop"
 
-$InstallBase = if ($env:HOMECLOUD_INSTALL_URL) { $env:HOMECLOUD_INSTALL_URL } else { "https://cli.homecloud.dev/releases" }
+$InstallBase = if ($env:HOMECLOUD_INSTALL_URL) { $env:HOMECLOUD_INSTALL_URL } else { "https://homecloud-cli.so.holab.abrdns.com/releases" }
 $Version = if ($env:HOMECLOUD_VERSION) { $env:HOMECLOUD_VERSION } else { "latest" }
 $InstallDir = if ($env:HOMECLOUD_INSTALL_DIR) { $env:HOMECLOUD_INSTALL_DIR } else { "$env:LOCALAPPDATA\Programs\homecloud" }
 $Artifact = "homecloud-windows-amd64.exe"
