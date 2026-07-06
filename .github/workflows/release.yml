@@ -63,15 +63,18 @@ jobs:
           files: artifacts/**
           generate_release_notes: true
 
+      # Optional MinIO/S3 upload — enable with repo variable S3_UPLOAD_ENABLED=true
+      # and secrets: HOMECLOUD_S3_ENDPOINT, HOMECLOUD_CLI_S3_ACCESS_KEY, HOMECLOUD_CLI_S3_SECRET_KEY
       - name: Upload to S3
-        if: ${{ secrets.HOMECLOUD_S3_ENDPOINT != '' }}
+        if: vars.S3_UPLOAD_ENABLED == 'true'
         env:
           HOMECLOUD_S3_ENDPOINT: ${{ secrets.HOMECLOUD_S3_ENDPOINT }}
           MINIO_ACCESS_KEY: ${{ secrets.HOMECLOUD_CLI_S3_ACCESS_KEY }}
           MINIO_SECRET_KEY: ${{ secrets.HOMECLOUD_CLI_S3_SECRET_KEY }}
-          HOMECLOUD_CLI_BUCKET: ${{ vars.HOMECLOUD_CLI_BUCKET || 'homecloud-cli' }}
+          HOMECLOUD_CLI_BUCKET: ${{ vars.HOMECLOUD_CLI_BUCKET }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          BUCKET="${HOMECLOUD_CLI_BUCKET:-homecloud-cli}"
           curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc
           chmod +x mc
           sudo mv mc /usr/local/bin/
@@ -79,6 +82,6 @@ jobs:
           for f in artifacts/homecloud-*; do
             base="$(basename "$f")"
             [[ "$base" == *.sha256 ]] && continue
-            mc cp "$f" "hc/${HOMECLOUD_CLI_BUCKET}/releases/v${VERSION}/${base}"
-            mc cp "$f" "hc/${HOMECLOUD_CLI_BUCKET}/releases/latest/${base}"
+            mc cp "$f" "hc/${BUCKET}/releases/v${VERSION}/${base}"
+            mc cp "$f" "hc/${BUCKET}/releases/latest/${base}"
           done
