@@ -16,19 +16,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: homecloud-cli
+
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/homecloud-sdk
           path: homecloud-sdk
-          ref: main
-        continue-on-error: true
+          ref: master
+          # If checkout fails on a private repo, add secret HOMECLOUD_SDK_CHECKOUT_TOKEN (PAT with repo read).
+          token: ${{ secrets.HOMECLOUD_SDK_CHECKOUT_TOKEN }}
+
+      - name: Verify homecloud-sdk checkout
+        run: test -f homecloud-sdk/pyproject.toml
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Install dependencies
         run: |
-          if [ -d ../homecloud-sdk ]; then
-            pip install -e ../homecloud-sdk
-          fi
+          pip install -e "${{ github.workspace }}/homecloud-sdk"
           pip install -e ".[dev]"
+
       - run: pytest tests/ -q

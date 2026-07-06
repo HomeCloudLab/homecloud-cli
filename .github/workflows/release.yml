@@ -38,7 +38,11 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/homecloud-sdk
           path: homecloud-sdk
-        continue-on-error: true
+          ref: master
+          token: ${{ secrets.HOMECLOUD_SDK_CHECKOUT_TOKEN }}
+
+      - name: Verify homecloud-sdk checkout
+        run: test -f homecloud-sdk/pyproject.toml
 
       - uses: actions/setup-python@v5
         with:
@@ -75,8 +79,9 @@ jobs:
           files: artifacts/**
           generate_release_notes: true
 
-      - name: Upload to S3 (optional)
-        if: env.HOMECLOUD_S3_ENDPOINT != ''
+      # Optional — skipped entirely when HOMECLOUD_S3_ENDPOINT secret is empty.
+      - name: Upload to S3
+        if: ${{ secrets.HOMECLOUD_S3_ENDPOINT != '' }}
         env:
           HOMECLOUD_S3_ENDPOINT: ${{ secrets.HOMECLOUD_S3_ENDPOINT }}
           MINIO_ACCESS_KEY: ${{ secrets.HOMECLOUD_CLI_S3_ACCESS_KEY }}
@@ -87,10 +92,10 @@ jobs:
           curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc
           chmod +x mc
           sudo mv mc /usr/local/bin/
+          mc alias set hc "$HOMECLOUD_S3_ENDPOINT" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY"
           for f in artifacts/homecloud-*; do
             base="$(basename "$f")"
             [[ "$base" == *.sha256 ]] && continue
-            mc alias set hc "$HOMECLOUD_S3_ENDPOINT" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY"
             mc cp "$f" "hc/${HOMECLOUD_CLI_BUCKET}/releases/v${VERSION}/${base}"
             mc cp "$f" "hc/${HOMECLOUD_CLI_BUCKET}/releases/latest/${base}"
           done
