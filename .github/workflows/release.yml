@@ -23,9 +23,7 @@ jobs:
           - os: ubuntu-latest
             target: linux-amd64
             script: bash scripts/build-binary.sh
-          - os: macos-13
-            target: darwin-amd64
-            script: bash scripts/build-binary.sh
+          # darwin-amd64 (macos-13) disabled — GitHub Intel Mac runners queue indefinitely on free tier
           - os: macos-latest
             target: darwin-arm64
             script: bash scripts/build-binary.sh

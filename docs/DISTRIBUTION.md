@@ -25,9 +25,10 @@ Invoke-WebRequest $url -OutFile "$env:LOCALAPPDATA\Programs\homecloud\homecloud.
 ```text
 https://homecloud-cli.so.holab.abrdns.com/releases/latest/homecloud-linux-amd64
 https://homecloud-cli.so.holab.abrdns.com/releases/latest/homecloud-darwin-arm64
-https://homecloud-cli.so.holab.abrdns.com/releases/latest/homecloud-darwin-amd64
 https://homecloud-cli.so.holab.abrdns.com/releases/latest/homecloud-windows-amd64.exe
 ```
+
+Intel Mac (`darwin-amd64`) is temporarily omitted from CI — GitHub `macos-13` runners rarely become available on free tier.
 
 Pinned version:
 
@@ -55,7 +56,7 @@ homecloud-cli/   (bucket — public read)
 
 Tag `v*` → GitHub Actions `release.yml`:
 
-1. Build 4 platform binaries
+1. Build 3 platform binaries (linux, darwin-arm64, windows)
 2. GitHub Release assets
 3. Upload to MinIO → `releases/v<version>/` + `releases/latest/`
 
