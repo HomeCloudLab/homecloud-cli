@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from homecloud_core.context import CoreContext
@@ -147,6 +148,87 @@ class StorageAPI:
         account_id = self._ctx.account_id()
         path = f"/{account_id}/{bucket_name}/objects/{object_key.lstrip('/')}"
         self._ctx.transport.data_plane_request("so", "DELETE", path, account_id)
+
+    def list_all_objects(
+        self,
+        bucket_name: str,
+        *,
+        prefix: str = "",
+        recursive: bool = True,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            data = self.list_objects(
+                bucket_name,
+                prefix=prefix,
+                recursive=recursive,
+                page=page,
+                page_size=100,
+            )
+            items.extend(
+                item for item in data.get("items", []) if not item.get("is_dir")
+            )
+            if page >= int(data.get("pages", 1)):
+                break
+            page += 1
+        return items
+
+    def delete_recursive(self, bucket_name: str, prefix: str = "") -> int:
+        deleted = 0
+        for item in self.list_all_objects(bucket_name, prefix=prefix, recursive=True):
+            self.delete(bucket_name, item["key"])
+            deleted += 1
+        return deleted
+
+    def sync_local_to_bucket(
+        self,
+        local_dir: str | Path,
+        bucket_name: str,
+        *,
+        prefix: str = "",
+        delete: bool = False,
+    ) -> dict[str, int]:
+        """Upload local directory to bucket (one-way, like aws s3 sync local → remote)."""
+        root = Path(local_dir)
+        if not root.is_dir():
+            raise HomeCloudError(f"Not a directory: {local_dir}")
+
+        prefix_clean = prefix.strip("/")
+        local_files: dict[str, Path] = {}
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root).as_posix()
+            key = f"{prefix_clean}/{rel}" if prefix_clean else rel
+            local_files[key] = path
+
+        remote_items = self.list_all_objects(
+            bucket_name,
+            prefix=prefix_clean,
+            recursive=True,
+        )
+        remote_by_key = {item["key"]: item for item in remote_items}
+
+        uploaded = 0
+        skipped = 0
+        for key, path in sorted(local_files.items()):
+            remote = remote_by_key.get(key)
+            local_size = path.stat().st_size
+            if remote is not None and remote.get("size") == local_size:
+                skipped += 1
+                continue
+            self.upload(bucket_name, path.as_posix(), key=key)
+            uploaded += 1
+
+        deleted = 0
+        if delete:
+            for key in remote_by_key:
+                if key not in local_files:
+                    self.delete(bucket_name, key)
+                    deleted += 1
+
+        return {"uploaded": uploaded, "skipped": skipped, "deleted": deleted}
 
 
 class SecretsAPI:

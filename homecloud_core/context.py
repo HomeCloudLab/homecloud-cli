@@ -12,7 +12,7 @@ from homecloud_core.config import (
     upsert_profile,
 )
 from homecloud_core.defaults import DEFAULT_PROFILE, platform_apex
-from homecloud_core.errors import HomeCloudError
+from homecloud_core.errors import HomeCloudError, NotConfiguredError
 from homecloud_core.session import (
     get_access_token,
     load_session,
@@ -40,6 +40,8 @@ class CoreContext:
         )
 
     def _apply_env_overrides(self) -> None:
+        if apex := os.environ.get("HOMECLOUD_APEX"):
+            self.profile.apex = apex.strip().rstrip("/")
         if account := os.environ.get("HOMECLOUD_ACCOUNT_ID"):
             self.profile.default_account_id = account
         if key_id := os.environ.get("HOMECLOUD_ACCESS_KEY_ID"):
@@ -52,7 +54,16 @@ class CoreContext:
         return self._transport
 
     def account_id(self) -> str:
-        account_id = resolve_account_id(self.profile, self._session)
+        try:
+            account_id = resolve_account_id(self.profile, self._session)
+        except NotConfiguredError:
+            if self.profile.access_key_id and self.profile.secret_access_key:
+                account_id = self._transport.resolve_access_key_account_id()
+            else:
+                raise NotConfiguredError(
+                    "Access Key not configured. "
+                    "Run: homecloud configure, or pass --access-key-id and --secret-access-key"
+                ) from None
         remember_account(self.profile_name, account_id)
         return account_id
 

@@ -133,12 +133,45 @@ def main_callback(
             is_eager=True,
         ),
     ] = False,
-    profile: Annotated[Optional[str], typer.Option(help="Configuration profile")] = None,
+    profile: Annotated[
+        Optional[str],
+        typer.Option("--profile", "-p", help="Credentials profile name"),
+    ] = None,
+    access_key_id: Annotated[
+        Optional[str],
+        typer.Option(
+            "--access-key-id",
+            envvar="HOMECLOUD_ACCESS_KEY_ID",
+            help="Access Key ID (overrides saved profile)",
+        ),
+    ] = None,
+    secret_access_key: Annotated[
+        Optional[str],
+        typer.Option(
+            "--secret-access-key",
+            envvar="HOMECLOUD_SECRET_ACCESS_KEY",
+            help="Secret Access Key (overrides saved profile)",
+        ),
+    ] = None,
+    apex: Annotated[
+        Optional[str],
+        typer.Option(
+            "--apex",
+            envvar="HOMECLOUD_APEX",
+            help="Platform apex domain (e.g. holab.abrdns.com)",
+        ),
+    ] = None,
 ) -> None:
-    if profile:
-        import os
+    import os
 
+    if profile:
         os.environ["HOMECLOUD_PROFILE"] = profile
+    if access_key_id is not None:
+        os.environ["HOMECLOUD_ACCESS_KEY_ID"] = access_key_id
+    if secret_access_key is not None:
+        os.environ["HOMECLOUD_SECRET_ACCESS_KEY"] = secret_access_key
+    if apex is not None:
+        os.environ["HOMECLOUD_APEX"] = apex
 
 
 @configure_app.callback(invoke_without_command=True)
@@ -309,6 +342,50 @@ def mq_receive(
     emit(items, output_format=_output_option(output))
 
 
+def _parse_so_uri(target: str) -> tuple[str, str]:
+    """Return (bucket, key_prefix) from so://bucket/path or bucket/path."""
+    cleaned = target.removeprefix("so://").removeprefix("s3://").strip("/")
+    if not cleaned:
+        raise typer.BadParameter("URI must include a bucket name")
+    parts = cleaned.split("/", 1)
+    bucket_name = parts[0]
+    key_prefix = parts[1] if len(parts) > 1 else ""
+    return bucket_name, key_prefix
+
+
+def _format_so_uri(bucket: str, key: str = "") -> str:
+    if key:
+        return f"so://{bucket}/{key.lstrip('/')}"
+    return f"so://{bucket}/"
+
+
+@so_app.command("sync")
+def so_sync(
+    local_path: Annotated[Path, typer.Argument(help="Local directory to upload")],
+    destination: Annotated[str, typer.Argument(help="so://bucket/ or so://bucket/prefix/")],
+    delete: Annotated[
+        bool,
+        typer.Option("--delete", help="Remove remote objects not present locally"),
+    ] = False,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format")] = "json",
+) -> None:
+    """Sync local directory to bucket (upload only; use --delete to mirror)."""
+    bucket_name, prefix = _parse_so_uri(destination)
+    if not local_path.is_dir():
+        raise typer.BadParameter(f"Not a directory: {local_path}")
+    try:
+        result = _client(profile).storage.sync_local_to_bucket(
+            local_path,
+            bucket_name,
+            prefix=prefix,
+            delete=delete,
+        )
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(result, output_format=_output_option(output))
+
+
 @so_app.command("ls-buckets")
 def so_ls_buckets(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
@@ -342,16 +419,14 @@ def so_ls(
 @so_app.command("cp")
 def so_cp(
     local_path: Annotated[Path, typer.Argument(help="Local file path")],
-    destination: Annotated[str, typer.Argument(help="s3://bucket/key or bucket/key")],
+    destination: Annotated[str, typer.Argument(help="so://bucket/key or bucket/key")],
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "json",
 ) -> None:
     """Upload a file to a bucket (data plane — Access Key)."""
-    dest = destination.removeprefix("s3://")
-    parts = dest.split("/", 1)
-    if len(parts) != 2:
-        raise typer.BadParameter("destination must be bucket/key or s3://bucket/key")
-    bucket_name, object_key = parts[0], parts[1]
+    bucket_name, object_key = _parse_so_uri(destination)
+    if not object_key:
+        raise typer.BadParameter("destination must be so://bucket/key or bucket/key")
     try:
         result = _client(profile).storage.upload(bucket_name, local_path.as_posix(), key=object_key)
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
@@ -361,20 +436,27 @@ def so_cp(
 
 @so_app.command("rm")
 def so_rm(
-    uri: Annotated[str, typer.Argument(help="s3://bucket/key or bucket/key")],
+    uri: Annotated[str, typer.Argument(help="so://bucket/key, so://bucket/, or bucket/prefix/")],
+    recursive: Annotated[
+        bool,
+        typer.Option("--recursive", "-r", help="Delete all objects under bucket or prefix"),
+    ] = False,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
 ) -> None:
-    """Delete an object (data plane — Access Key)."""
-    target = uri.removeprefix("s3://")
-    parts = target.split("/", 1)
-    if len(parts) != 2:
-        raise typer.BadParameter("uri must be bucket/key or s3://bucket/key")
-    bucket_name, object_key = parts[0], parts[1]
+    """Delete an object, or recursively delete a bucket/prefix."""
+    bucket_name, object_key = _parse_so_uri(uri)
     try:
+        if recursive:
+            count = _client(profile).storage.delete_recursive(bucket_name, prefix=object_key)
+            scope = object_key or bucket_name
+            typer.echo(f"Deleted {count} object(s) under {_format_so_uri(bucket_name, scope)}")
+            return
+        if not object_key:
+            raise typer.BadParameter("Object key required unless --recursive is set")
         _client(profile).storage.delete(bucket_name, object_key)
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
-    typer.echo(f"Deleted s3://{bucket_name}/{object_key}")
+    typer.echo(f"Deleted {_format_so_uri(bucket_name, object_key)}")
 
 
 def main() -> None:

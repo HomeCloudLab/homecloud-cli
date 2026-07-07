@@ -6,6 +6,8 @@ import os
 
 DEFAULT_APEX = "holab.abrdns.com"
 DEFAULT_PROFILE = "default"
+WHOAMI_PATH = "/access-key/whoami"
+WHOAMI_ACCOUNT_SENTINEL = "-"
 
 
 def platform_apex() -> str:

@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 
 import httpx
 
-from homecloud_core.defaults import console_url, mq_url, secrets_url, so_url
+from homecloud_core.defaults import WHOAMI_ACCOUNT_SENTINEL, WHOAMI_PATH, console_url, mq_url, secrets_url, so_url
 from homecloud_core.errors import HomeCloudError, NotLoggedInError
 from homecloud_core.signing import sign_request_headers
 
@@ -66,7 +66,10 @@ class Transport:
         files: dict[str, Any] | None = None,
     ) -> Any:
         if not self.access_key_id or not self.secret_access_key:
-            raise HomeCloudError("Access Key not configured. Run: homecloud configure")
+            raise HomeCloudError(
+                "Access Key not configured. "
+                "Run: homecloud configure, or pass --access-key-id and --secret-access-key"
+            )
 
         base_urls = {
             "mq": mq_url(self.apex),
@@ -123,6 +126,27 @@ class Transport:
             )
             time.sleep(0.5 * (attempt + 1))
         raise last_error or HomeCloudError("Request failed")
+
+    def resolve_access_key_account_id(self) -> str:
+        if not self.access_key_id or not self.secret_access_key:
+            raise HomeCloudError(
+                "Access Key not configured. "
+                "Run: homecloud configure, or pass --access-key-id and --secret-access-key"
+            )
+
+        headers = sign_request_headers(
+            access_key_id=self.access_key_id,
+            secret=self.secret_access_key,
+            method="GET",
+            path=WHOAMI_PATH,
+            account_id=WHOAMI_ACCOUNT_SENTINEL,
+        )
+        url = f"{so_url(self.apex).rstrip('/')}{WHOAMI_PATH}"
+        data = self._request("GET", url, headers=headers)
+        account_id = data.get("account_id")
+        if not account_id:
+            raise HomeCloudError("Could not resolve account from Access Key")
+        return str(account_id)
 
     @staticmethod
     def _parse(response: httpx.Response) -> Any:
