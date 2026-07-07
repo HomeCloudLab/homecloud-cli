@@ -18,11 +18,11 @@ def runner() -> CliRunner:
 def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.7" in result.stdout
+    assert "0.2.8" in result.stdout
 
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "homecloud 0.2.7" in result.stdout
+    assert "homecloud 0.2.8" in result.stdout
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
@@ -153,7 +153,7 @@ def test_mq_send_powershell_mangled_json(
         ["mq", "send", "demo-queue", "--body", "{hello:world}", "--output", "json"],
     )
     assert result.exit_code == 0, result.stdout
-    assert captured["json"] == {"body": {"hello": "world"}}
+    assert captured["json"] == {"body": '{"hello": "world"}'}
 
 
 def test_mq_send_invalid_json_shows_helpful_error(runner: CliRunner) -> None:

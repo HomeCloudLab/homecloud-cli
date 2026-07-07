@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from homecloud_core.context import CoreContext
@@ -42,7 +43,8 @@ class MqAPI:
     ) -> dict[str, Any]:
         account_id = self._ctx.account_id()
         path = f"/{account_id}/{queue_name}/messages"
-        payload: dict[str, Any] = {"body": body}
+        body_str = body if isinstance(body, str) else json.dumps(body)
+        payload: dict[str, Any] = {"body": body_str}
         if headers:
             payload["headers"] = headers
         return self._ctx.transport.data_plane_request(
