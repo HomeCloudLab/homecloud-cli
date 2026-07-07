@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 
 from rich.console import Console
@@ -17,6 +18,7 @@ class SoTransferProgress:
     console: Console = field(default_factory=lambda: Console(stderr=True))
     _progress: Progress | None = field(default=None, init=False, repr=False)
     _task_id: int | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __enter__(self) -> SoTransferProgress:
         self._progress = Progress(
@@ -36,24 +38,30 @@ class SoTransferProgress:
             self._progress.__exit__(*args)
 
     def _advance(self) -> None:
-        if self._progress is not None and self._task_id is not None:
-            self._progress.advance(self._task_id)
+        with self._lock:
+            if self._progress is not None and self._task_id is not None:
+                self._progress.advance(self._task_id)
 
     def upload(self, key: str) -> None:
-        self.console.print(f"[green]upload[/]  {key}")
+        with self._lock:
+            self.console.print(f"[green]upload[/]  {key}")
         self._advance()
 
     def download(self, key: str) -> None:
-        self.console.print(f"[green]download[/]  {key}")
+        with self._lock:
+            self.console.print(f"[green]download[/]  {key}")
         self._advance()
 
     def skip(self, key: str) -> None:
-        self.console.print(f"[dim]skip[/]    {key}")
+        with self._lock:
+            self.console.print(f"[dim]skip[/]    {key}")
         self._advance()
 
     def delete(self, key: str) -> None:
-        self.console.print(f"[red]delete[/]  {key}")
+        with self._lock:
+            self.console.print(f"[red]delete[/]  {key}")
         self._advance()
 
     def message(self, text: str) -> None:
-        self.console.print(f"[cyan]{text}[/]")
+        with self._lock:
+            self.console.print(f"[cyan]{text}[/]")

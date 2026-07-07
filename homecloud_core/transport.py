@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Literal
 from urllib.parse import urljoin
@@ -33,6 +34,23 @@ class Transport:
         self.secret_access_key = secret_access_key
         self.access_token = access_token
         self.timeout = timeout
+        self._http_client: httpx.Client | None = None
+        self._http_lock = threading.Lock()
+
+    def _http(self) -> httpx.Client:
+        with self._http_lock:
+            if self._http_client is None:
+                self._http_client = httpx.Client(
+                    timeout=httpx.Timeout(self.timeout),
+                    limits=httpx.Limits(max_connections=100, max_keepalive_connections=32),
+                )
+            return self._http_client
+
+    def close(self) -> None:
+        with self._http_lock:
+            if self._http_client is not None:
+                self._http_client.close()
+                self._http_client = None
 
     def console_request(
         self,
@@ -83,9 +101,9 @@ class Transport:
         )
         url = f"{base_urls[plane].rstrip('/')}{path}"
         last_error: HomeCloudError | None = None
+        client = self._http()
         for attempt in range(_MAX_RETRIES + 1):
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.request(method, url, headers=headers, params=params)
+            response = client.request(method, url, headers=headers, params=params)
             if response.status_code not in _RETRY_STATUS or attempt == _MAX_RETRIES:
                 if response.is_success:
                     return response.content
@@ -161,17 +179,17 @@ class Transport:
         files: dict[str, Any] | None = None,
     ) -> Any:
         last_error: HomeCloudError | None = None
+        client = self._http()
         for attempt in range(_MAX_RETRIES + 1):
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.request(
-                    method,
-                    url,
-                    headers=headers,
-                    json=json,
-                    params=params,
-                    data=data,
-                    files=files,
-                )
+            response = client.request(
+                method,
+                url,
+                headers=headers,
+                json=json,
+                params=params,
+                data=data,
+                files=files,
+            )
             if response.status_code not in _RETRY_STATUS or attempt == _MAX_RETRIES:
                 return self._parse(response)
             last_error = HomeCloudError(

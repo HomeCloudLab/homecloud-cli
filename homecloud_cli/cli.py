@@ -11,6 +11,7 @@ import typer
 from homecloud_core.defaults import DEFAULT_PROFILE
 from homecloud_core.errors import HomeCloudError
 from homecloud_sdk import HomeCloudClient
+from homecloud_sdk.so_parallel import DEFAULT_SO_WORKERS
 from rich.console import Console
 
 from homecloud_cli import __version__
@@ -378,6 +379,7 @@ def _run_so_sync_upload(
     *,
     delete: bool,
     output: str,
+    workers: int,
 ) -> dict[str, Any]:
     show_progress = _show_transfer_progress(output)
     progress: SoTransferProgress | None = None
@@ -412,6 +414,7 @@ def _run_so_sync_upload(
             bucket_name,
             prefix=prefix,
             delete=delete,
+            max_workers=workers,
             on_begin=on_begin,
             on_upload=on_upload,
             on_skip=on_skip,
@@ -431,6 +434,7 @@ def _run_so_sync_download(
     *,
     delete: bool,
     output: str,
+    workers: int,
 ) -> dict[str, Any]:
     show_progress = _show_transfer_progress(output)
     progress: SoTransferProgress | None = None
@@ -465,6 +469,7 @@ def _run_so_sync_download(
             local_path,
             prefix=prefix,
             delete=delete,
+            max_workers=workers,
             on_begin=on_begin,
             on_download=on_download,
             on_skip=on_skip,
@@ -487,6 +492,16 @@ def so_sync(
             help="Mirror mode: remove extra files on the destination side",
         ),
     ] = False,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            "-j",
+            min=1,
+            max=64,
+            help=f"Parallel file transfers (default {DEFAULT_SO_WORKERS})",
+        ),
+    ] = DEFAULT_SO_WORKERS,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format (json suppresses live progress)")] = "table",
 ) -> None:
@@ -517,6 +532,7 @@ def so_sync(
                 local_path,
                 delete=delete,
                 output=output,
+                workers=workers,
             )
         else:
             local_path = Path(source)
@@ -530,6 +546,7 @@ def so_sync(
                 prefix,
                 delete=delete,
                 output=output,
+                workers=workers,
             )
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
@@ -602,6 +619,16 @@ def so_rm(
         bool,
         typer.Option("--recursive", "-r", help="Delete all objects under bucket or prefix"),
     ] = False,
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            "-j",
+            min=1,
+            max=64,
+            help=f"Parallel deletes when using --recursive (default {DEFAULT_SO_WORKERS})",
+        ),
+    ] = DEFAULT_SO_WORKERS,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
 ) -> None:
     """Delete an object, or recursively delete a bucket/prefix."""
@@ -620,6 +647,7 @@ def so_rm(
                 count = _client(profile).so.delete_recursive(
                     bucket_name,
                     prefix=object_key,
+                    max_workers=workers,
                     on_begin=on_begin,
                     on_delete=progress.delete if progress else None,
                 )

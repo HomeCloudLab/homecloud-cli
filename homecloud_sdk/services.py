@@ -9,6 +9,7 @@ from typing import Any
 
 from homecloud_core.context import CoreContext
 from homecloud_core.errors import HomeCloudError
+from homecloud_sdk.so_parallel import DEFAULT_SO_WORKERS, run_parallel
 
 
 class AccountsAPI:
@@ -198,20 +199,22 @@ class SoAPI:
         bucket_name: str,
         prefix: str = "",
         *,
+        max_workers: int = DEFAULT_SO_WORKERS,
         on_begin: Callable[[int], None] | None = None,
         on_delete: Callable[[str], None] | None = None,
     ) -> int:
         items = self.list_all_objects(bucket_name, prefix=prefix, recursive=True)
         if on_begin is not None:
             on_begin(len(items))
-        deleted = 0
-        for item in items:
-            key = item["key"]
+        keys = [item["key"] for item in items]
+
+        def do_delete(key: str) -> None:
+            self.delete(bucket_name, key)
             if on_delete is not None:
                 on_delete(key)
-            self.delete(bucket_name, key)
-            deleted += 1
-        return deleted
+
+        run_parallel(keys, do_delete, max_workers=max_workers)
+        return len(keys)
 
     def sync_local_to_bucket(
         self,
@@ -220,6 +223,7 @@ class SoAPI:
         *,
         prefix: str = "",
         delete: bool = False,
+        max_workers: int = DEFAULT_SO_WORKERS,
         on_upload: Callable[[str], None] | None = None,
         on_skip: Callable[[str], None] | None = None,
         on_delete: Callable[[str], None] | None = None,
@@ -269,26 +273,30 @@ class SoAPI:
         if on_begin is not None:
             on_begin(total_ops)
 
-        uploaded = 0
         skipped = 0
         for key in to_skip:
             if on_skip is not None:
                 on_skip(key)
             skipped += 1
 
-        for key in to_upload:
+        def do_upload(key: str) -> None:
             path = local_files[key]
             self.upload(bucket_name, path.as_posix(), key=key)
             if on_upload is not None:
                 on_upload(key)
-            uploaded += 1
+
+        run_parallel(to_upload, do_upload, max_workers=max_workers)
+        uploaded = len(to_upload)
 
         deleted = 0
-        for key in to_delete:
+
+        def do_delete(key: str) -> None:
             self.delete(bucket_name, key)
             if on_delete is not None:
                 on_delete(key)
-            deleted += 1
+
+        run_parallel(to_delete, do_delete, max_workers=max_workers)
+        deleted = len(to_delete)
 
         return {"uploaded": uploaded, "skipped": skipped, "deleted": deleted}
 
@@ -299,6 +307,7 @@ class SoAPI:
         *,
         prefix: str = "",
         delete: bool = False,
+        max_workers: int = DEFAULT_SO_WORKERS,
         on_download: Callable[[str], None] | None = None,
         on_skip: Callable[[str], None] | None = None,
         on_delete: Callable[[str], None] | None = None,
@@ -353,21 +362,22 @@ class SoAPI:
         if on_begin is not None:
             on_begin(total_ops)
 
-        downloaded = 0
         skipped = 0
         for key in to_skip:
             if on_skip is not None:
                 on_skip(key)
             skipped += 1
 
-        for key in to_download:
+        def do_download(key: str) -> None:
             rel = key[len(prefix_clean) + 1 :] if prefix_clean else key
             dest = root / rel
             self.download(bucket_name, key, dest_path=dest)
             local_files[key] = dest
             if on_download is not None:
                 on_download(key)
-            downloaded += 1
+
+        run_parallel(to_download, do_download, max_workers=max_workers)
+        downloaded = len(to_download)
 
         deleted = 0
         for key in to_delete:
