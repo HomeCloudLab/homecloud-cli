@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -85,7 +86,9 @@ class AppsAPI:
         return data.get("items", [])
 
 
-class StorageAPI:
+class SoAPI:
+    """Object storage (SO) — use client.so, not client.storage."""
+
     def __init__(self, ctx: CoreContext) -> None:
         self._ctx = ctx
 
@@ -149,6 +152,22 @@ class StorageAPI:
         path = f"/{account_id}/{bucket_name}/objects/{object_key.lstrip('/')}"
         self._ctx.transport.data_plane_request("so", "DELETE", path, account_id)
 
+    def download(
+        self,
+        bucket_name: str,
+        object_key: str,
+        *,
+        dest_path: str | Path,
+    ) -> dict[str, Any]:
+        account_id = self._ctx.account_id()
+        key = object_key.lstrip("/")
+        path = f"/{account_id}/{bucket_name}/objects/{key}"
+        content = self._ctx.transport.data_plane_request_bytes("so", "GET", path, account_id)
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+        return {"key": key, "size": len(content), "path": str(dest)}
+
     def list_all_objects(
         self,
         bucket_name: str,
@@ -174,10 +193,23 @@ class StorageAPI:
             page += 1
         return items
 
-    def delete_recursive(self, bucket_name: str, prefix: str = "") -> int:
+    def delete_recursive(
+        self,
+        bucket_name: str,
+        prefix: str = "",
+        *,
+        on_begin: Callable[[int], None] | None = None,
+        on_delete: Callable[[str], None] | None = None,
+    ) -> int:
+        items = self.list_all_objects(bucket_name, prefix=prefix, recursive=True)
+        if on_begin is not None:
+            on_begin(len(items))
         deleted = 0
-        for item in self.list_all_objects(bucket_name, prefix=prefix, recursive=True):
-            self.delete(bucket_name, item["key"])
+        for item in items:
+            key = item["key"]
+            if on_delete is not None:
+                on_delete(key)
+            self.delete(bucket_name, key)
             deleted += 1
         return deleted
 
@@ -188,6 +220,11 @@ class StorageAPI:
         *,
         prefix: str = "",
         delete: bool = False,
+        on_upload: Callable[[str], None] | None = None,
+        on_skip: Callable[[str], None] | None = None,
+        on_delete: Callable[[str], None] | None = None,
+        on_begin: Callable[[int], None] | None = None,
+        on_status: Callable[[str], None] | None = None,
     ) -> dict[str, int]:
         """Upload local directory to bucket (one-way, like aws s3 sync local → remote)."""
         root = Path(local_dir)
@@ -210,25 +247,141 @@ class StorageAPI:
         )
         remote_by_key = {item["key"]: item for item in remote_items}
 
-        uploaded = 0
-        skipped = 0
+        to_upload: list[str] = []
+        to_skip: list[str] = []
         for key, path in sorted(local_files.items()):
             remote = remote_by_key.get(key)
             local_size = path.stat().st_size
             if remote is not None and remote.get("size") == local_size:
-                skipped += 1
-                continue
+                to_skip.append(key)
+            else:
+                to_upload.append(key)
+
+        to_delete = (
+            [key for key in remote_by_key if key not in local_files]
+            if delete
+            else []
+        )
+
+        total_ops = len(to_upload) + len(to_skip) + len(to_delete)
+        if on_status is not None:
+            on_status(f"scan  {len(local_files)} local, {len(remote_by_key)} remote, {total_ops} operations")
+        if on_begin is not None:
+            on_begin(total_ops)
+
+        uploaded = 0
+        skipped = 0
+        for key in to_skip:
+            if on_skip is not None:
+                on_skip(key)
+            skipped += 1
+
+        for key in to_upload:
+            path = local_files[key]
             self.upload(bucket_name, path.as_posix(), key=key)
+            if on_upload is not None:
+                on_upload(key)
             uploaded += 1
 
         deleted = 0
-        if delete:
-            for key in remote_by_key:
-                if key not in local_files:
-                    self.delete(bucket_name, key)
-                    deleted += 1
+        for key in to_delete:
+            self.delete(bucket_name, key)
+            if on_delete is not None:
+                on_delete(key)
+            deleted += 1
 
         return {"uploaded": uploaded, "skipped": skipped, "deleted": deleted}
+
+    def sync_bucket_to_local(
+        self,
+        bucket_name: str,
+        local_dir: str | Path,
+        *,
+        prefix: str = "",
+        delete: bool = False,
+        on_download: Callable[[str], None] | None = None,
+        on_skip: Callable[[str], None] | None = None,
+        on_delete: Callable[[str], None] | None = None,
+        on_begin: Callable[[int], None] | None = None,
+        on_status: Callable[[str], None] | None = None,
+    ) -> dict[str, int]:
+        """Download bucket prefix to local directory (like aws s3 sync remote → local)."""
+        root = Path(local_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        if not root.is_dir():
+            raise HomeCloudError(f"Not a directory: {local_dir}")
+
+        prefix_clean = prefix.strip("/")
+        remote_items = self.list_all_objects(
+            bucket_name,
+            prefix=prefix_clean,
+            recursive=True,
+        )
+        remote_by_key = {item["key"]: item for item in remote_items}
+
+        local_files: dict[str, Path] = {}
+        if root.exists():
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(root).as_posix()
+                key = f"{prefix_clean}/{rel}" if prefix_clean else rel
+                local_files[key] = path
+
+        to_download: list[str] = []
+        to_skip: list[str] = []
+        for key in sorted(remote_by_key):
+            remote = remote_by_key[key]
+            local_path = local_files.get(key)
+            remote_size = int(remote.get("size") or 0)
+            if local_path is not None and local_path.is_file() and local_path.stat().st_size == remote_size:
+                to_skip.append(key)
+            else:
+                to_download.append(key)
+
+        to_delete = (
+            [key for key in local_files if key not in remote_by_key]
+            if delete
+            else []
+        )
+
+        total_ops = len(to_download) + len(to_skip) + len(to_delete)
+        if on_status is not None:
+            on_status(
+                f"scan  {len(remote_by_key)} remote, {len(local_files)} local, {total_ops} operations"
+            )
+        if on_begin is not None:
+            on_begin(total_ops)
+
+        downloaded = 0
+        skipped = 0
+        for key in to_skip:
+            if on_skip is not None:
+                on_skip(key)
+            skipped += 1
+
+        for key in to_download:
+            rel = key[len(prefix_clean) + 1 :] if prefix_clean else key
+            dest = root / rel
+            self.download(bucket_name, key, dest_path=dest)
+            local_files[key] = dest
+            if on_download is not None:
+                on_download(key)
+            downloaded += 1
+
+        deleted = 0
+        for key in to_delete:
+            path = local_files[key]
+            if path.is_file():
+                path.unlink()
+            if on_delete is not None:
+                on_delete(key)
+            deleted += 1
+
+        return {"downloaded": downloaded, "skipped": skipped, "deleted": deleted}
+
+
+StorageAPI = SoAPI
 
 
 class SecretsAPI:

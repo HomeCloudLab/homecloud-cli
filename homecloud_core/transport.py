@@ -53,6 +53,60 @@ class Transport:
         url = urljoin(console_url(self.apex).rstrip("/") + "/", path.lstrip("/"))
         return self._request(method, url, headers=headers, json=json, params=params)
 
+    def data_plane_request_bytes(
+        self,
+        plane: Plane,
+        method: str,
+        path: str,
+        account_id: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> bytes:
+        """Raw response body for binary endpoints (e.g. SO object download)."""
+        if not self.access_key_id or not self.secret_access_key:
+            raise HomeCloudError(
+                "Access Key not configured. "
+                "Run: homecloud configure, or pass --access-key-id and --secret-access-key"
+            )
+
+        base_urls = {
+            "mq": mq_url(self.apex),
+            "so": so_url(self.apex),
+            "secrets": secrets_url(self.apex),
+        }
+        headers = sign_request_headers(
+            access_key_id=self.access_key_id,
+            secret=self.secret_access_key,
+            method=method,
+            path=path,
+            account_id=account_id,
+        )
+        url = f"{base_urls[plane].rstrip('/')}{path}"
+        last_error: HomeCloudError | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.request(method, url, headers=headers, params=params)
+            if response.status_code not in _RETRY_STATUS or attempt == _MAX_RETRIES:
+                if response.is_success:
+                    return response.content
+                detail: Any
+                try:
+                    body = response.json()
+                    detail = body.get("detail", body)
+                except Exception:
+                    detail = response.text
+                raise HomeCloudError(
+                    f"Request failed ({response.status_code})",
+                    status_code=response.status_code,
+                    detail=detail,
+                )
+            last_error = HomeCloudError(
+                f"Request failed ({response.status_code})",
+                status_code=response.status_code,
+            )
+            time.sleep(0.5 * (attempt + 1))
+        raise last_error or HomeCloudError("Request failed")
+
     def data_plane_request(
         self,
         plane: Plane,

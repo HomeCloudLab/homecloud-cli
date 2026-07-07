@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from homecloud_core.context import CoreContext
-from homecloud_sdk.services import AccountsAPI, AppsAPI, MqAPI, QueuesAPI, SecretsAPI, StorageAPI
+from homecloud_sdk.services import AccountsAPI, AppsAPI, MqAPI, QueuesAPI, SecretsAPI, SoAPI, StorageAPI
 
 
 class HomeCloudClient:
@@ -35,8 +35,13 @@ class HomeCloudClient:
         return MqAPI(self._ctx)
 
     @property
-    def storage(self) -> StorageAPI:
-        return StorageAPI(self._ctx)
+    def so(self) -> SoAPI:
+        return SoAPI(self._ctx)
+
+    @property
+    def storage(self) -> SoAPI:
+        """Alias for so — prefer client.so."""
+        return self.so
 
     @property
     def secrets(self) -> SecretsAPI:

@@ -11,9 +11,11 @@ import typer
 from homecloud_core.defaults import DEFAULT_PROFILE
 from homecloud_core.errors import HomeCloudError
 from homecloud_sdk import HomeCloudClient
+from rich.console import Console
 
 from homecloud_cli import __version__
 from homecloud_cli.output import emit
+from homecloud_cli.so_progress import SoTransferProgress
 
 app = typer.Typer(no_args_is_help=True, help="HomeCloud command-line interface")
 configure_app = typer.Typer(help="Set up Access Keys and profiles")
@@ -342,6 +344,11 @@ def mq_receive(
     emit(items, output_format=_output_option(output))
 
 
+def _is_so_uri(target: str) -> bool:
+    lowered = target.lower()
+    return lowered.startswith("so://") or lowered.startswith("s3://")
+
+
 def _parse_so_uri(target: str) -> tuple[str, str]:
     """Return (bucket, key_prefix) from so://bucket/path or bucket/path."""
     cleaned = target.removeprefix("so://").removeprefix("s3://").strip("/")
@@ -359,28 +366,171 @@ def _format_so_uri(bucket: str, key: str = "") -> str:
     return f"so://{bucket}/"
 
 
-@so_app.command("sync")
-def so_sync(
-    local_path: Annotated[Path, typer.Argument(help="Local directory to upload")],
-    destination: Annotated[str, typer.Argument(help="so://bucket/ or so://bucket/prefix/")],
-    delete: Annotated[
-        bool,
-        typer.Option("--delete", help="Remove remote objects not present locally"),
-    ] = False,
-    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
-    output: Annotated[str, typer.Option(help="Output format")] = "json",
-) -> None:
-    """Sync local directory to bucket (upload only; use --delete to mirror)."""
-    bucket_name, prefix = _parse_so_uri(destination)
-    if not local_path.is_dir():
-        raise typer.BadParameter(f"Not a directory: {local_path}")
+def _show_transfer_progress(output: str) -> bool:
+    return _output_option(output) != "json"
+
+
+def _run_so_sync_upload(
+    client: HomeCloudClient,
+    local_path: Path,
+    bucket_name: str,
+    prefix: str,
+    *,
+    delete: bool,
+    output: str,
+) -> dict[str, Any]:
+    show_progress = _show_transfer_progress(output)
+    progress: SoTransferProgress | None = None
+
+    def on_begin(total: int) -> None:
+        nonlocal progress
+        if not show_progress:
+            return
+        dest = _format_so_uri(bucket_name, prefix)
+        progress = SoTransferProgress(f"sync → {dest}", total)
+        progress.__enter__()
+
+    def on_upload(key: str) -> None:
+        if progress is not None:
+            progress.upload(key)
+
+    def on_skip(key: str) -> None:
+        if progress is not None:
+            progress.skip(key)
+
+    def on_delete(key: str) -> None:
+        if progress is not None:
+            progress.delete(key)
+
+    def on_status(msg: str) -> None:
+        if show_progress:
+            Console(stderr=True).print(f"[cyan]{msg}[/]")
+
     try:
-        result = _client(profile).storage.sync_local_to_bucket(
+        return client.so.sync_local_to_bucket(
             local_path,
             bucket_name,
             prefix=prefix,
             delete=delete,
+            on_begin=on_begin,
+            on_upload=on_upload,
+            on_skip=on_skip,
+            on_delete=on_delete,
+            on_status=on_status,
         )
+    finally:
+        if progress is not None:
+            progress.__exit__(None, None, None)
+
+
+def _run_so_sync_download(
+    client: HomeCloudClient,
+    bucket_name: str,
+    prefix: str,
+    local_path: Path,
+    *,
+    delete: bool,
+    output: str,
+) -> dict[str, Any]:
+    show_progress = _show_transfer_progress(output)
+    progress: SoTransferProgress | None = None
+    source = _format_so_uri(bucket_name, prefix)
+
+    def on_begin(total: int) -> None:
+        nonlocal progress
+        if not show_progress:
+            return
+        progress = SoTransferProgress(f"sync ← {source}", total)
+        progress.__enter__()
+
+    def on_download(key: str) -> None:
+        if progress is not None:
+            progress.download(key)
+
+    def on_skip(key: str) -> None:
+        if progress is not None:
+            progress.skip(key)
+
+    def on_delete(key: str) -> None:
+        if progress is not None:
+            progress.delete(key)
+
+    def on_status(msg: str) -> None:
+        if show_progress:
+            Console(stderr=True).print(f"[cyan]{msg}[/]")
+
+    try:
+        return client.so.sync_bucket_to_local(
+            bucket_name,
+            local_path,
+            prefix=prefix,
+            delete=delete,
+            on_begin=on_begin,
+            on_download=on_download,
+            on_skip=on_skip,
+            on_delete=on_delete,
+            on_status=on_status,
+        )
+    finally:
+        if progress is not None:
+            progress.__exit__(None, None, None)
+
+
+@so_app.command("sync")
+def so_sync(
+    source: Annotated[str, typer.Argument(help="Local dir (upload) or so://bucket/ (download)")],
+    destination: Annotated[str, typer.Argument(help="so://bucket/ (upload) or local dir (download)")],
+    delete: Annotated[
+        bool,
+        typer.Option(
+            "--delete",
+            help="Mirror mode: remove extra files on the destination side",
+        ),
+    ] = False,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format (json suppresses live progress)")] = "table",
+) -> None:
+    """Sync local ↔ bucket (like aws s3 sync). Upload: ./dir so://b/  Download: so://b/ ./dir"""
+    source_is_so = _is_so_uri(source)
+    dest_is_so = _is_so_uri(destination)
+
+    if source_is_so and dest_is_so:
+        raise typer.BadParameter(
+            "Cannot sync remote to remote. Use: homecloud so sync ./local so://bucket/ "
+            "or: homecloud so sync so://bucket/ ./local"
+        )
+    if not source_is_so and not dest_is_so:
+        raise typer.BadParameter(
+            "One argument must be a so:// URI. Upload: homecloud so sync ./local so://bucket/ "
+            "Download: homecloud so sync so://bucket/ ./local"
+        )
+
+    client = _client(profile)
+    try:
+        if source_is_so:
+            bucket_name, prefix = _parse_so_uri(source)
+            local_path = Path(destination)
+            result = _run_so_sync_download(
+                client,
+                bucket_name,
+                prefix,
+                local_path,
+                delete=delete,
+                output=output,
+            )
+        else:
+            local_path = Path(source)
+            if not local_path.is_dir():
+                raise typer.BadParameter(f"Not a directory: {local_path}")
+            bucket_name, prefix = _parse_so_uri(destination)
+            result = _run_so_sync_upload(
+                client,
+                local_path,
+                bucket_name,
+                prefix,
+                delete=delete,
+                output=output,
+            )
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(result, output_format=_output_option(output))
@@ -393,7 +543,7 @@ def so_ls_buckets(
 ) -> None:
     """List storage buckets (console API — requires login)."""
     try:
-        items = _client(profile).storage.list_buckets()
+        items = _client(profile).so.list_buckets()
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(items, output_format=_output_option(output), columns=["name", "status"])
@@ -409,7 +559,7 @@ def so_ls(
 ) -> None:
     """List objects in a bucket (data plane — Access Key)."""
     try:
-        data = _client(profile).storage.list_objects(bucket, prefix=prefix, recursive=recursive)
+        data = _client(profile).so.list_objects(bucket, prefix=prefix, recursive=recursive)
         items = data.get("items", [])
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
@@ -421,14 +571,25 @@ def so_cp(
     local_path: Annotated[Path, typer.Argument(help="Local file path")],
     destination: Annotated[str, typer.Argument(help="so://bucket/key or bucket/key")],
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
-    output: Annotated[str, typer.Option(help="Output format")] = "json",
+    output: Annotated[str, typer.Option(help="Output format (json suppresses live progress)")] = "table",
 ) -> None:
     """Upload a file to a bucket (data plane — Access Key)."""
     bucket_name, object_key = _parse_so_uri(destination)
     if not object_key:
         raise typer.BadParameter("destination must be so://bucket/key or bucket/key")
+    uri = _format_so_uri(bucket_name, object_key)
+    show_progress = _show_transfer_progress(output)
     try:
-        result = _client(profile).storage.upload(bucket_name, local_path.as_posix(), key=object_key)
+        if show_progress:
+            with SoTransferProgress(f"upload → {uri}", 1) as prog:
+                result = _client(profile).so.upload(
+                    bucket_name, local_path.as_posix(), key=object_key
+                )
+                prog.upload(uri)
+        else:
+            result = _client(profile).so.upload(
+                bucket_name, local_path.as_posix(), key=object_key
+            )
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(result, output_format=_output_option(output))
@@ -447,16 +608,35 @@ def so_rm(
     bucket_name, object_key = _parse_so_uri(uri)
     try:
         if recursive:
-            count = _client(profile).storage.delete_recursive(bucket_name, prefix=object_key)
-            scope = object_key or bucket_name
-            typer.echo(f"Deleted {count} object(s) under {_format_so_uri(bucket_name, scope)}")
+            scope = _format_so_uri(bucket_name, object_key or "")
+            progress: SoTransferProgress | None = None
+
+            def on_begin(total: int) -> None:
+                nonlocal progress
+                progress = SoTransferProgress(f"delete → {scope}", total)
+                progress.__enter__()
+
+            try:
+                count = _client(profile).so.delete_recursive(
+                    bucket_name,
+                    prefix=object_key,
+                    on_begin=on_begin,
+                    on_delete=progress.delete if progress else None,
+                )
+            finally:
+                if progress is not None:
+                    progress.__exit__(None, None, None)
+            typer.echo(f"Deleted {count} object(s) under {scope}")
             return
         if not object_key:
             raise typer.BadParameter("Object key required unless --recursive is set")
-        _client(profile).storage.delete(bucket_name, object_key)
+        target = _format_so_uri(bucket_name, object_key)
+        with SoTransferProgress(f"delete → {target}", 1) as prog:
+            _client(profile).so.delete(bucket_name, object_key)
+            prog.delete(target)
+        return
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
-    typer.echo(f"Deleted {_format_so_uri(bucket_name, object_key)}")
 
 
 def main() -> None:

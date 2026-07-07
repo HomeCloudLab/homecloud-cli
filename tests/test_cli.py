@@ -18,11 +18,11 @@ def runner() -> CliRunner:
 def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.10" in result.stdout
+    assert "0.2.12" in result.stdout
 
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "homecloud 0.2.10" in result.stdout
+    assert "homecloud 0.2.12" in result.stdout
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
@@ -312,6 +312,84 @@ def test_so_sync_uploads_new_files(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     assert ("upload", "index.html") in calls
+
+
+def test_so_sync_downloads_remote_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "apex": "example.test",
+                        "access_key_id": "HCAK1",
+                        "secret_access_key": "secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+
+    local = tmp_path / "site"
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method: str, url: str, **kwargs):
+            if "/access-key/whoami" in url:
+                return httpx.Response(
+                    200,
+                    json={"account_id": "acc-1", "account_short_id": "acct"},
+                )
+            if method == "GET" and url.endswith("/objects") or (
+                method == "GET" and "/objects?" in url
+            ):
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [{"key": "index.html", "size": 13, "is_dir": False}],
+                        "total": 1,
+                        "pages": 1,
+                        "page": 1,
+                        "page_size": 100,
+                    },
+                )
+            if method == "GET" and "/objects/index.html" in url:
+                return httpx.Response(200, content=b"<html></html>")
+            return httpx.Response(404)
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    result = runner.invoke(
+        app,
+        ["so", "sync", "so://docs/", str(local), "--output", "json"],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert (local / "index.html").read_text(encoding="utf-8") == "<html></html>"
+
+
+def test_so_sync_rejects_two_local_paths(
+    runner: CliRunner,
+) -> None:
+    result = runner.invoke(app, ["so", "sync", "./a", "./b"])
+    assert result.exit_code != 0
+    assert "so://" in result.stderr or "so://" in result.stdout
 
 
 def test_so_rm_recursive_deletes_prefix(
