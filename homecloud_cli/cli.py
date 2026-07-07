@@ -83,13 +83,15 @@ def _load_mq_body(body: str, body_file: Path | None) -> dict[str, Any]:
     return _parse_mq_body(body)
 
 
+def _mq_body_error_message(exc: json.JSONDecodeError) -> str:
+    return (
+        f"Invalid JSON in --body: {exc.msg}\n"
+        'PowerShell: --body "{`"hello`":`"world`"}"  '
+        'or --body ''{"hello":"world"}'''
+    )
+
+
 def _format_error(exc: Exception) -> str:
-    if isinstance(exc, json.JSONDecodeError):
-        return (
-            f"Invalid JSON in --body: {exc.msg}\n"
-            'PowerShell: --body "{`"hello`":`"world`"}"  '
-            'or --body ''{"hello":"world"}'''
-        )
     if isinstance(exc, HomeCloudError):
         if exc.status_code == 404 and isinstance(exc.detail, str):
             return exc.detail
@@ -302,7 +304,7 @@ def mq_send(
         payload = _load_mq_body(body, body_file)
         result = _client(profile).mq.send(queue_name, payload)
     except json.JSONDecodeError as exc:
-        _handle_error(exc)
+        _handle_error(HomeCloudError(_mq_body_error_message(exc)))
     except HomeCloudError as exc:
         if exc.status_code == 404 and exc.detail == "Queue not found":
             _handle_error(

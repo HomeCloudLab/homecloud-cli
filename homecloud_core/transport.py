@@ -103,7 +103,13 @@ class Transport:
         last_error: HomeCloudError | None = None
         client = self._http()
         for attempt in range(_MAX_RETRIES + 1):
-            response = client.request(method, url, headers=headers, params=params)
+            try:
+                response = client.request(method, url, headers=headers, params=params)
+            except httpx.HTTPError as exc:
+                if attempt == _MAX_RETRIES:
+                    raise HomeCloudError(f"Request failed: {exc}") from exc
+                time.sleep(0.5 * (attempt + 1))
+                continue
             if response.status_code not in _RETRY_STATUS or attempt == _MAX_RETRIES:
                 if response.is_success:
                     return response.content
@@ -181,15 +187,21 @@ class Transport:
         last_error: HomeCloudError | None = None
         client = self._http()
         for attempt in range(_MAX_RETRIES + 1):
-            response = client.request(
-                method,
-                url,
-                headers=headers,
-                json=json,
-                params=params,
-                data=data,
-                files=files,
-            )
+            try:
+                response = client.request(
+                    method,
+                    url,
+                    headers=headers,
+                    json=json,
+                    params=params,
+                    data=data,
+                    files=files,
+                )
+            except httpx.HTTPError as exc:
+                if attempt == _MAX_RETRIES:
+                    raise HomeCloudError(f"Request failed: {exc}") from exc
+                time.sleep(0.5 * (attempt + 1))
+                continue
             if response.status_code not in _RETRY_STATUS or attempt == _MAX_RETRIES:
                 return self._parse(response)
             last_error = HomeCloudError(
@@ -225,7 +237,13 @@ class Transport:
         if response.is_success:
             if not response.content:
                 return {}
-            return response.json()
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise HomeCloudError(
+                    f"Invalid JSON response ({response.status_code}) from {response.request.url}",
+                    status_code=response.status_code,
+                ) from exc
 
         detail: Any
         try:

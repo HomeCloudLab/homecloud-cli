@@ -32,6 +32,7 @@ class CoreContext:
             self.profile = ProfileConfig(name=self.profile_name)
         self._session = load_session().get(self.profile_name)
         self._apply_env_overrides()
+        self._account_id: str | None = None
         self._transport = Transport(
             apex=self.profile.apex,
             access_key_id=self.profile.access_key_id,
@@ -54,6 +55,8 @@ class CoreContext:
         return self._transport
 
     def account_id(self) -> str:
+        if self._account_id is not None:
+            return self._account_id
         try:
             account_id = resolve_account_id(self.profile, self._session)
         except NotConfiguredError:
@@ -65,6 +68,7 @@ class CoreContext:
                     "Run: homecloud configure, or pass --access-key-id and --secret-access-key"
                 ) from None
         remember_account(self.profile_name, account_id)
+        self._account_id = account_id
         return account_id
 
     def login(self, username: str, password: str) -> None:
