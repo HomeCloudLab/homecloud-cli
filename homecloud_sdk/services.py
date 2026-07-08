@@ -9,6 +9,7 @@ from typing import Any
 
 from homecloud_core.context import CoreContext
 from homecloud_core.errors import HomeCloudError
+from homecloud_core.so_paths import so_object_paths, sync_relative_local_path
 from homecloud_sdk.so_parallel import DEFAULT_SO_WORKERS, run_parallel
 
 
@@ -150,8 +151,14 @@ class SoAPI:
 
     def delete(self, bucket_name: str, object_key: str) -> None:
         account_id = self._ctx.account_id()
-        path = f"/{account_id}/{bucket_name}/objects/{object_key.lstrip('/')}"
-        self._ctx.transport.data_plane_request("so", "DELETE", path, account_id)
+        sign_path, url_path = so_object_paths(account_id, bucket_name, object_key)
+        self._ctx.transport.data_plane_request(
+            "so",
+            "DELETE",
+            sign_path,
+            account_id,
+            url_path=url_path,
+        )
 
     def download(
         self,
@@ -162,12 +169,16 @@ class SoAPI:
     ) -> dict[str, Any]:
         account_id = self._ctx.account_id()
         key = object_key.lstrip("/")
-        path = f"/{account_id}/{bucket_name}/objects/{key}"
-        content = self._ctx.transport.data_plane_request_bytes("so", "GET", path, account_id)
+        sign_path, url_path = so_object_paths(account_id, bucket_name, key)
         dest = Path(dest_path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(content)
-        return {"key": key, "size": len(content), "path": str(dest)}
+        nbytes = self._ctx.transport.data_plane_download_to_file(
+            "so",
+            sign_path,
+            account_id,
+            dest,
+            url_path=url_path,
+        )
+        return {"key": key, "size": nbytes, "path": str(dest)}
 
     def list_all_objects(
         self,
@@ -376,7 +387,7 @@ class SoAPI:
             skipped += 1
 
         def do_download(key: str) -> None:
-            rel = key[len(prefix_clean) + 1 :] if prefix_clean else key
+            rel = sync_relative_local_path(key, prefix_clean)
             dest = root / rel
             self.download(bucket_name, key, dest_path=dest)
             local_files[key] = dest

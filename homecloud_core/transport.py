@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urljoin
 
@@ -78,6 +80,7 @@ class Transport:
         path: str,
         account_id: str,
         *,
+        url_path: str | None = None,
         params: dict[str, Any] | None = None,
     ) -> bytes:
         """Raw response body for binary endpoints (e.g. SO object download)."""
@@ -99,7 +102,7 @@ class Transport:
             path=path,
             account_id=account_id,
         )
-        url = f"{base_urls[plane].rstrip('/')}{path}"
+        url = f"{base_urls[plane].rstrip('/')}{url_path or path}"
         last_error: HomeCloudError | None = None
         client = self._http()
         for attempt in range(_MAX_RETRIES + 1):
@@ -131,6 +134,86 @@ class Transport:
             time.sleep(0.5 * (attempt + 1))
         raise last_error or HomeCloudError("Request failed")
 
+    def data_plane_download_to_file(
+        self,
+        plane: Plane,
+        path: str,
+        account_id: str,
+        dest: Path,
+        *,
+        url_path: str | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> int:
+        """Stream a binary response to disk (for large SO objects)."""
+        if not self.access_key_id or not self.secret_access_key:
+            raise HomeCloudError(
+                "Access Key not configured. "
+                "Run: homecloud configure, or pass --access-key-id and --secret-access-key"
+            )
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        base_urls = {
+            "mq": mq_url(self.apex),
+            "so": so_url(self.apex),
+            "secrets": secrets_url(self.apex),
+        }
+        headers = sign_request_headers(
+            access_key_id=self.access_key_id,
+            secret=self.secret_access_key,
+            method="GET",
+            path=path,
+            account_id=account_id,
+        )
+        url = f"{base_urls[plane].rstrip('/')}{url_path or path}"
+        last_error: HomeCloudError | None = None
+        client = self._http()
+        download_timeout = httpx.Timeout(30.0, read=None)
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                with client.stream(
+                    "GET",
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=download_timeout,
+                ) as response:
+                    if response.status_code in _RETRY_STATUS and attempt < _MAX_RETRIES:
+                        last_error = HomeCloudError(
+                            f"Request failed ({response.status_code})",
+                            status_code=response.status_code,
+                        )
+                        time.sleep(0.5 * (attempt + 1))
+                        continue
+                    if not response.is_success:
+                        detail: Any
+                        try:
+                            body = response.read()
+                            parsed = json.loads(body)
+                            detail = parsed.get("detail", parsed)
+                        except Exception:
+                            detail = response.text or response.reason_phrase
+                        raise HomeCloudError(
+                            f"Request failed ({response.status_code})",
+                            status_code=response.status_code,
+                            detail=detail,
+                        )
+
+                    nbytes = 0
+                    with dest.open("wb") as handle:
+                        for chunk in response.iter_bytes(1024 * 1024):
+                            handle.write(chunk)
+                            nbytes += len(chunk)
+                    return nbytes
+            except HomeCloudError:
+                raise
+            except httpx.HTTPError as exc:
+                if attempt == _MAX_RETRIES:
+                    raise HomeCloudError(f"Request failed: {exc}") from exc
+                time.sleep(0.5 * (attempt + 1))
+                continue
+        raise last_error or HomeCloudError("Request failed")
+
     def data_plane_request(
         self,
         plane: Plane,
@@ -138,6 +221,7 @@ class Transport:
         path: str,
         account_id: str,
         *,
+        url_path: str | None = None,
         json: Any | None = None,
         params: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
@@ -162,7 +246,7 @@ class Transport:
             path=path,
             account_id=account_id,
         )
-        url = f"{base.rstrip('/')}{path}"
+        url = f"{base.rstrip('/')}{url_path or path}"
         return self._request(
             method,
             url,
