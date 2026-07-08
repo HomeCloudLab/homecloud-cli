@@ -18,11 +18,11 @@ def runner() -> CliRunner:
 def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.17" in result.stdout
+    assert "0.2.18" in result.stdout
 
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "homecloud 0.2.17" in result.stdout
+    assert "homecloud 0.2.18" in result.stdout
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
@@ -784,6 +784,121 @@ def test_so_rm_recursive_deletes_prefix(
     assert result.exit_code == 0, result.stdout + result.stderr
     assert len(deleted) == 1
     assert deleted[0].endswith("/objects/a.txt")
+
+
+def test_so_cp_downloads_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "apex": "example.test",
+                        "access_key_id": "HCAK1",
+                        "secret_access_key": "secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+
+    local = tmp_path / "out.bin"
+    object_key = "watch/spider noir/1/file.mkv"
+    downloaded_urls: list[str] = []
+
+    class MockStreamResponse:
+        status_code = 200
+
+        @property
+        def is_success(self) -> bool:
+            return True
+
+        def iter_bytes(self, chunk_size: int = 1024) -> bytes:
+            yield b"cp-bytes"
+
+        def read(self) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            return None
+
+    class MockStreamContext:
+        def __init__(self, response: MockStreamResponse):
+            self._response = response
+
+        def __enter__(self) -> MockStreamResponse:
+            return self._response
+
+        def __exit__(self, *args) -> bool:
+            return False
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method: str, url: str, **kwargs):
+            if "/access-key/whoami" in url:
+                return httpx.Response(
+                    200,
+                    json={"account_id": "acc-1", "account_short_id": "acct"},
+                )
+            if method == "GET" and "/objects/watch/spider%20noir/1/file.mkv/metadata" in url:
+                return httpx.Response(
+                    200,
+                    json={"key": object_key, "size": 8, "metadata": {}, "tags": {}},
+                )
+            return httpx.Response(404)
+
+        def stream(self, method: str, url: str, **kwargs):
+            downloaded_urls.append(url)
+            if method == "GET" and "/objects/watch/spider%20noir/1/file.mkv" in url:
+                return MockStreamContext(MockStreamResponse())
+            return MockStreamContext(
+                type(
+                    "Err",
+                    (),
+                    {
+                        "status_code": 404,
+                        "is_success": property(lambda self: False),
+                        "iter_bytes": lambda self, chunk_size=1024: iter(()),
+                        "read": lambda self: b"not found",
+                        "close": lambda self: None,
+                    },
+                )()
+            )
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "so",
+            "cp",
+            f"so://my-bucket/{object_key}",
+            str(local),
+            "--output",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert local.read_bytes() == b"cp-bytes"
+    assert downloaded_urls
+    assert "%20" in downloaded_urls[0]
 
 
 def test_inline_access_key_flags_without_credentials_file(

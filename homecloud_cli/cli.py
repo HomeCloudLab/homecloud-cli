@@ -619,33 +619,83 @@ def so_ls(
 
 @so_app.command("cp")
 def so_cp(
-    local_path: Annotated[Path, typer.Argument(help="Local file path")],
-    destination: Annotated[str, typer.Argument(help="so://bucket/key or bucket/key")],
+    source: Annotated[str, typer.Argument(help="Local file or so://bucket/key")],
+    destination: Annotated[str, typer.Argument(help="so://bucket/key or local file path")],
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format (json suppresses live progress)")] = "table",
 ) -> None:
-    """Upload a file to a bucket (data plane — Access Key)."""
-    bucket_name, object_key = _parse_so_uri(destination)
-    if not object_key:
-        raise typer.BadParameter("destination must be so://bucket/key or bucket/key")
-    uri = _format_so_uri(bucket_name, object_key)
+    """Copy a file local ↔ bucket. Upload: ./file so://b/k  Download: so://b/k ./file"""
+    source_is_so = _is_so_uri(source)
+    dest_is_so = _is_so_uri(destination)
+
+    if source_is_so and dest_is_so:
+        raise typer.BadParameter(
+            "Cannot copy remote to remote. Use: homecloud so cp ./local so://bucket/key "
+            "or: homecloud so cp so://bucket/key ./local"
+        )
+    if not source_is_so and not dest_is_so:
+        raise typer.BadParameter(
+            "One argument must be a so:// URI. Upload: homecloud so cp ./local so://bucket/key "
+            "Download: homecloud so cp so://bucket/key ./local"
+        )
+
+    client = _client(profile)
     show_progress = _show_transfer_progress(output)
+
     try:
-        if show_progress:
-            file_size = local_path.stat().st_size
-            with TransferProgress(f"upload → {uri}", "upload", file_size, 1) as prog:
-                prog.file_begin(object_key)
-                result = _client(profile).so.upload(
-                    bucket_name,
-                    local_path.as_posix(),
-                    key=object_key,
-                    on_bytes=prog.add_bytes,
-                )
-                prog.file_complete(object_key)
+        if source_is_so:
+            bucket_name, object_key = _parse_so_uri(source)
+            if not object_key:
+                raise typer.BadParameter("source must be so://bucket/key or bucket/key")
+            uri = _format_so_uri(bucket_name, object_key)
+            dest = Path(destination)
+            if dest.exists() and dest.is_dir():
+                dest = dest / object_key.rsplit("/", 1)[-1]
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            file_size = 0
+            try:
+                meta = client.so.object_metadata(bucket_name, object_key)
+                file_size = int(meta.get("size") or 0)
+            except HomeCloudError:
+                pass
+
+            if show_progress:
+                with TransferProgress(f"cp ← {uri}", "download", file_size, 1) as prog:
+                    prog.file_begin(object_key)
+                    result = client.so.download(
+                        bucket_name,
+                        object_key,
+                        dest_path=dest,
+                        on_bytes=prog.add_bytes,
+                    )
+                    prog.file_complete(object_key)
+            else:
+                result = client.so.download(bucket_name, object_key, dest_path=dest)
         else:
-            result = _client(profile).so.upload(
-                bucket_name, local_path.as_posix(), key=object_key
-            )
+            local_path = Path(source)
+            if not local_path.is_file():
+                raise typer.BadParameter(f"Not a file: {local_path}")
+            bucket_name, object_key = _parse_so_uri(destination)
+            if not object_key:
+                raise typer.BadParameter("destination must be so://bucket/key or bucket/key")
+            uri = _format_so_uri(bucket_name, object_key)
+
+            if show_progress:
+                file_size = local_path.stat().st_size
+                with TransferProgress(f"cp → {uri}", "upload", file_size, 1) as prog:
+                    prog.file_begin(object_key)
+                    result = client.so.upload(
+                        bucket_name,
+                        local_path.as_posix(),
+                        key=object_key,
+                        on_bytes=prog.add_bytes,
+                    )
+                    prog.file_complete(object_key)
+            else:
+                result = client.so.upload(
+                    bucket_name, local_path.as_posix(), key=object_key
+                )
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(result, output_format=_output_option(output))
