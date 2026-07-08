@@ -380,6 +380,7 @@ def _run_so_sync_upload(
     prefix: str,
     *,
     delete: bool,
+    skip: bool,
     output: str,
     workers: int,
 ) -> dict[str, Any]:
@@ -416,6 +417,7 @@ def _run_so_sync_upload(
             bucket_name,
             prefix=prefix,
             delete=delete,
+            skip=skip,
             max_workers=workers,
             on_begin=on_begin,
             on_upload=on_upload,
@@ -435,6 +437,7 @@ def _run_so_sync_download(
     local_path: Path,
     *,
     delete: bool,
+    skip: bool,
     output: str,
     workers: int,
 ) -> dict[str, Any]:
@@ -471,6 +474,7 @@ def _run_so_sync_download(
             local_path,
             prefix=prefix,
             delete=delete,
+            skip=skip,
             max_workers=workers,
             on_begin=on_begin,
             on_download=on_download,
@@ -494,6 +498,13 @@ def so_sync(
             help="Mirror mode: remove extra files on the destination side",
         ),
     ] = False,
+    skip: Annotated[
+        bool,
+        typer.Option(
+            "--skip",
+            help="Skip files whose size already matches on the destination (default: overwrite)",
+        ),
+    ] = False,
     workers: Annotated[
         int,
         typer.Option(
@@ -507,7 +518,7 @@ def so_sync(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format (json suppresses live progress)")] = "table",
 ) -> None:
-    """Sync local ↔ bucket (like aws s3 sync). Upload: ./dir so://b/  Download: so://b/ ./dir"""
+    """Sync local ↔ bucket. Overwrites by default. Upload: ./dir so://b/  Download: so://b/ ./dir"""
     source_is_so = _is_so_uri(source)
     dest_is_so = _is_so_uri(destination)
 
@@ -533,6 +544,7 @@ def so_sync(
                 prefix,
                 local_path,
                 delete=delete,
+                skip=skip,
                 output=output,
                 workers=workers,
             )
@@ -547,6 +559,7 @@ def so_sync(
                 bucket_name,
                 prefix,
                 delete=delete,
+                skip=skip,
                 output=output,
                 workers=workers,
             )

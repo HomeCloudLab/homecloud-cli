@@ -18,11 +18,11 @@ def runner() -> CliRunner:
 def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.14" in result.stdout
+    assert "0.2.15" in result.stdout
 
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "homecloud 0.2.14" in result.stdout
+    assert "homecloud 0.2.15" in result.stdout
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
@@ -312,6 +312,164 @@ def test_so_sync_uploads_new_files(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     assert ("upload", "index.html") in calls
+
+
+def test_so_sync_overwrites_same_size_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "apex": "example.test",
+                        "access_key_id": "HCAK1",
+                        "secret_access_key": "secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+
+    local = tmp_path / "dist"
+    local.mkdir()
+    content = b"<html>v2</html>"
+    (local / "index.html").write_bytes(content)
+
+    uploads: list[str] = []
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method: str, url: str, **kwargs):
+            if "/access-key/whoami" in url:
+                return httpx.Response(
+                    200,
+                    json={"account_id": "acc-1", "account_short_id": "acct"},
+                )
+            if method == "GET" and "/objects" in url and "multipart" not in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {"key": "index.html", "size": len(content), "is_dir": False}
+                        ],
+                        "total": 1,
+                        "pages": 1,
+                        "page": 1,
+                        "page_size": 100,
+                    },
+                )
+            if method == "POST" and "/objects" in url:
+                uploads.append(kwargs.get("data", {}).get("key", ""))
+                return httpx.Response(201, json={"key": "index.html"})
+            return httpx.Response(404)
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    result = runner.invoke(
+        app,
+        ["so", "sync", str(local), "so://my-bucket/", "--output", "json"],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert uploads == ["index.html"]
+    summary = json.loads(result.stdout)
+    assert summary["uploaded"] == 1
+    assert summary["skipped"] == 0
+
+
+def test_so_sync_skip_same_size_when_flag_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "apex": "example.test",
+                        "access_key_id": "HCAK1",
+                        "secret_access_key": "secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+
+    local = tmp_path / "dist"
+    local.mkdir()
+    content = b"<html>same</html>"
+    (local / "index.html").write_bytes(content)
+
+    uploads: list[str] = []
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method: str, url: str, **kwargs):
+            if "/access-key/whoami" in url:
+                return httpx.Response(
+                    200,
+                    json={"account_id": "acc-1", "account_short_id": "acct"},
+                )
+            if method == "GET" and "/objects" in url and "multipart" not in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {"key": "index.html", "size": len(content), "is_dir": False}
+                        ],
+                        "total": 1,
+                        "pages": 1,
+                        "page": 1,
+                        "page_size": 100,
+                    },
+                )
+            if method == "POST" and "/objects" in url:
+                uploads.append(kwargs.get("data", {}).get("key", ""))
+                return httpx.Response(201, json={"key": "index.html"})
+            return httpx.Response(404)
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    result = runner.invoke(
+        app,
+        ["so", "sync", str(local), "so://my-bucket/", "--skip", "--output", "json"],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert uploads == []
+    summary = json.loads(result.stdout)
+    assert summary["uploaded"] == 0
+    assert summary["skipped"] == 1
 
 
 def test_so_sync_downloads_remote_files(

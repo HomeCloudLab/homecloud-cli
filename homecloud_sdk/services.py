@@ -223,6 +223,7 @@ class SoAPI:
         *,
         prefix: str = "",
         delete: bool = False,
+        skip: bool = False,
         max_workers: int = DEFAULT_SO_WORKERS,
         on_upload: Callable[[str], None] | None = None,
         on_skip: Callable[[str], None] | None = None,
@@ -230,7 +231,7 @@ class SoAPI:
         on_begin: Callable[[int], None] | None = None,
         on_status: Callable[[str], None] | None = None,
     ) -> dict[str, int]:
-        """Upload local directory to bucket (one-way, like aws s3 sync local → remote)."""
+        """Upload local directory to bucket (one-way). Overwrites by default; use skip=True to skip same-size keys."""
         root = Path(local_dir)
         if not root.is_dir():
             raise HomeCloudError(f"Not a directory: {local_dir}")
@@ -256,7 +257,7 @@ class SoAPI:
         for key, path in sorted(local_files.items()):
             remote = remote_by_key.get(key)
             local_size = path.stat().st_size
-            if remote is not None and remote.get("size") == local_size:
+            if skip and remote is not None and remote.get("size") == local_size:
                 to_skip.append(key)
             else:
                 to_upload.append(key)
@@ -307,6 +308,7 @@ class SoAPI:
         *,
         prefix: str = "",
         delete: bool = False,
+        skip: bool = False,
         max_workers: int = DEFAULT_SO_WORKERS,
         on_download: Callable[[str], None] | None = None,
         on_skip: Callable[[str], None] | None = None,
@@ -314,7 +316,7 @@ class SoAPI:
         on_begin: Callable[[int], None] | None = None,
         on_status: Callable[[str], None] | None = None,
     ) -> dict[str, int]:
-        """Download bucket prefix to local directory (like aws s3 sync remote → local)."""
+        """Download bucket prefix to local directory. Overwrites by default; use skip=True to skip same-size files."""
         root = Path(local_dir)
         root.mkdir(parents=True, exist_ok=True)
         if not root.is_dir():
@@ -343,7 +345,12 @@ class SoAPI:
             remote = remote_by_key[key]
             local_path = local_files.get(key)
             remote_size = int(remote.get("size") or 0)
-            if local_path is not None and local_path.is_file() and local_path.stat().st_size == remote_size:
+            if (
+                skip
+                and local_path is not None
+                and local_path.is_file()
+                and local_path.stat().st_size == remote_size
+            ):
                 to_skip.append(key)
             else:
                 to_download.append(key)
