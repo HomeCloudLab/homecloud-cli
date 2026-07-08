@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urljoin
@@ -143,6 +144,7 @@ class Transport:
         *,
         url_path: str | None = None,
         params: dict[str, Any] | None = None,
+        on_chunk: Callable[[int], None] | None = None,
     ) -> int:
         """Stream a binary response to disk (for large SO objects)."""
         if not self.access_key_id or not self.secret_access_key:
@@ -203,7 +205,10 @@ class Transport:
                     with dest.open("wb") as handle:
                         for chunk in response.iter_bytes(1024 * 1024):
                             handle.write(chunk)
-                            nbytes += len(chunk)
+                            chunk_len = len(chunk)
+                            nbytes += chunk_len
+                            if on_chunk is not None:
+                                on_chunk(chunk_len)
                     return nbytes
             except HomeCloudError:
                 raise

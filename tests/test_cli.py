@@ -18,11 +18,11 @@ def runner() -> CliRunner:
 def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.16" in result.stdout
+    assert "0.2.17" in result.stdout
 
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "homecloud 0.2.16" in result.stdout
+    assert "homecloud 0.2.17" in result.stdout
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
@@ -654,12 +654,17 @@ def test_so_sync_downloads_object_key_with_spaces(
                     200,
                     json={"account_id": "acc-1", "account_short_id": "acct"},
                 )
+            if method == "GET" and "/objects/watch/spider%20noir/1/file.mkv/metadata" in url:
+                return httpx.Response(
+                    200,
+                    json={"key": object_key, "size": 11, "metadata": {}, "tags": {}},
+                )
             if method == "GET" and "/objects" in url and "multipart" not in url:
                 return httpx.Response(
                     200,
                     json={
-                        "items": [{"key": object_key, "size": 11, "is_dir": False}],
-                        "total": 1,
+                        "items": [],
+                        "total": 0,
                         "pages": 1,
                         "page": 1,
                         "page_size": 100,

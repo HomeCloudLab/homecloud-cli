@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import typer
 from homecloud_core.defaults import DEFAULT_PROFILE
@@ -17,6 +18,7 @@ from rich.console import Console
 from homecloud_cli import __version__
 from homecloud_cli.output import emit
 from homecloud_cli.so_progress import SoTransferProgress
+from homecloud_cli.transfer_progress import TransferProgress
 
 app = typer.Typer(no_args_is_help=True, help="HomeCloud command-line interface")
 configure_app = typer.Typer(help="Set up Access Keys and profiles")
@@ -373,6 +375,71 @@ def _show_transfer_progress(output: str) -> bool:
     return _output_option(output) != "json"
 
 
+def _run_so_sync_transfer(
+    *,
+    label: str,
+    action: Literal["upload", "download"],
+    show_progress: bool,
+    sync_call: Callable[..., dict[str, int]],
+) -> dict[str, Any]:
+    progress: TransferProgress | None = None
+
+    def on_transfer_begin(total_bytes: int, files_total: int) -> None:
+        nonlocal progress
+        if not show_progress:
+            return
+        progress = TransferProgress(label, action, total_bytes, files_total)
+        progress.__enter__()
+
+    def on_bytes(nbytes: int) -> None:
+        if progress is not None:
+            progress.add_bytes(nbytes)
+
+    def on_file_begin(key: str) -> None:
+        if progress is not None:
+            progress.file_begin(key)
+
+    def on_file_complete(key: str) -> None:
+        if progress is not None:
+            progress.file_complete(key)
+
+    def on_skip(key: str) -> None:
+        if progress is not None:
+            progress.skip(key)
+
+    def on_delete(key: str) -> None:
+        if progress is not None:
+            progress.delete(key)
+
+    def on_status(msg: str) -> None:
+        if not show_progress:
+            return
+        if progress is not None:
+            progress.message(msg)
+        else:
+            Console(stderr=True).print(f"[cyan]{msg}[/]")
+
+    file_done = on_file_complete
+    kwargs: dict[str, Any] = {
+        "on_transfer_begin": on_transfer_begin,
+        "on_bytes": on_bytes,
+        "on_file_begin": on_file_begin,
+        "on_skip": on_skip,
+        "on_delete": on_delete,
+        "on_status": on_status,
+    }
+    if action == "upload":
+        kwargs["on_upload"] = file_done
+    else:
+        kwargs["on_download"] = file_done
+
+    try:
+        return sync_call(**kwargs)
+    finally:
+        if progress is not None:
+            progress.__exit__(None, None, None)
+
+
 def _run_so_sync_upload(
     client: HomeCloudClient,
     local_path: Path,
@@ -385,33 +452,9 @@ def _run_so_sync_upload(
     workers: int,
 ) -> dict[str, Any]:
     show_progress = _show_transfer_progress(output)
-    progress: SoTransferProgress | None = None
+    dest = _format_so_uri(bucket_name, prefix)
 
-    def on_begin(total: int) -> None:
-        nonlocal progress
-        if not show_progress:
-            return
-        dest = _format_so_uri(bucket_name, prefix)
-        progress = SoTransferProgress(f"sync → {dest}", total)
-        progress.__enter__()
-
-    def on_upload(key: str) -> None:
-        if progress is not None:
-            progress.upload(key)
-
-    def on_skip(key: str) -> None:
-        if progress is not None:
-            progress.skip(key)
-
-    def on_delete(key: str) -> None:
-        if progress is not None:
-            progress.delete(key)
-
-    def on_status(msg: str) -> None:
-        if show_progress:
-            Console(stderr=True).print(f"[cyan]{msg}[/]")
-
-    try:
+    def sync_call(**kwargs: Any) -> dict[str, int]:
         return client.so.sync_local_to_bucket(
             local_path,
             bucket_name,
@@ -419,15 +462,15 @@ def _run_so_sync_upload(
             delete=delete,
             skip=skip,
             max_workers=workers,
-            on_begin=on_begin,
-            on_upload=on_upload,
-            on_skip=on_skip,
-            on_delete=on_delete,
-            on_status=on_status,
+            **kwargs,
         )
-    finally:
-        if progress is not None:
-            progress.__exit__(None, None, None)
+
+    return _run_so_sync_transfer(
+        label=f"sync → {dest}",
+        action="upload",
+        show_progress=show_progress,
+        sync_call=sync_call,
+    )
 
 
 def _run_so_sync_download(
@@ -442,33 +485,9 @@ def _run_so_sync_download(
     workers: int,
 ) -> dict[str, Any]:
     show_progress = _show_transfer_progress(output)
-    progress: SoTransferProgress | None = None
     source = _format_so_uri(bucket_name, prefix)
 
-    def on_begin(total: int) -> None:
-        nonlocal progress
-        if not show_progress:
-            return
-        progress = SoTransferProgress(f"sync ← {source}", total)
-        progress.__enter__()
-
-    def on_download(key: str) -> None:
-        if progress is not None:
-            progress.download(key)
-
-    def on_skip(key: str) -> None:
-        if progress is not None:
-            progress.skip(key)
-
-    def on_delete(key: str) -> None:
-        if progress is not None:
-            progress.delete(key)
-
-    def on_status(msg: str) -> None:
-        if show_progress:
-            Console(stderr=True).print(f"[cyan]{msg}[/]")
-
-    try:
+    def sync_call(**kwargs: Any) -> dict[str, int]:
         return client.so.sync_bucket_to_local(
             bucket_name,
             local_path,
@@ -476,15 +495,15 @@ def _run_so_sync_download(
             delete=delete,
             skip=skip,
             max_workers=workers,
-            on_begin=on_begin,
-            on_download=on_download,
-            on_skip=on_skip,
-            on_delete=on_delete,
-            on_status=on_status,
+            **kwargs,
         )
-    finally:
-        if progress is not None:
-            progress.__exit__(None, None, None)
+
+    return _run_so_sync_transfer(
+        label=f"sync ← {source}",
+        action="download",
+        show_progress=show_progress,
+        sync_call=sync_call,
+    )
 
 
 @so_app.command("sync")
@@ -613,11 +632,16 @@ def so_cp(
     show_progress = _show_transfer_progress(output)
     try:
         if show_progress:
-            with SoTransferProgress(f"upload → {uri}", 1) as prog:
+            file_size = local_path.stat().st_size
+            with TransferProgress(f"upload → {uri}", "upload", file_size, 1) as prog:
+                prog.file_begin(object_key)
                 result = _client(profile).so.upload(
-                    bucket_name, local_path.as_posix(), key=object_key
+                    bucket_name,
+                    local_path.as_posix(),
+                    key=object_key,
+                    on_bytes=prog.add_bytes,
                 )
-                prog.upload(uri)
+                prog.file_complete(object_key)
         else:
             result = _client(profile).so.upload(
                 bucket_name, local_path.as_posix(), key=object_key

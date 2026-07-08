@@ -9,6 +9,7 @@ from typing import Any
 
 from homecloud_core.context import CoreContext
 from homecloud_core.errors import HomeCloudError
+from homecloud_core.progress_reader import ProgressReader
 from homecloud_core.so_paths import so_object_paths, sync_relative_local_path
 from homecloud_sdk.so_parallel import DEFAULT_SO_WORKERS, run_parallel
 
@@ -129,6 +130,7 @@ class SoAPI:
         file_path: str,
         *,
         key: str | None = None,
+        on_bytes: Callable[[int], None] | None = None,
     ) -> dict[str, Any]:
         from pathlib import Path
 
@@ -140,13 +142,14 @@ class SoAPI:
         account_id = self._ctx.account_id()
         upload_path = f"/{account_id}/{bucket_name}/objects"
         with path.open("rb") as handle:
+            body = ProgressReader(handle, on_bytes) if on_bytes is not None else handle
             return self._ctx.transport.data_plane_request(
                 "so",
                 "POST",
                 upload_path,
                 account_id,
                 data={"key": object_key},
-                files={"file": (path.name, handle, "application/octet-stream")},
+                files={"file": (path.name, body, "application/octet-stream")},
             )
 
     def delete(self, bucket_name: str, object_key: str) -> None:
@@ -166,6 +169,7 @@ class SoAPI:
         object_key: str,
         *,
         dest_path: str | Path,
+        on_bytes: Callable[[int], None] | None = None,
     ) -> dict[str, Any]:
         account_id = self._ctx.account_id()
         key = object_key.lstrip("/")
@@ -177,8 +181,45 @@ class SoAPI:
             account_id,
             dest,
             url_path=url_path,
+            on_chunk=on_bytes,
         )
         return {"key": key, "size": nbytes, "path": str(dest)}
+
+    def object_metadata(self, bucket_name: str, object_key: str) -> dict[str, Any]:
+        account_id = self._ctx.account_id()
+        key = object_key.lstrip("/")
+        sign_path, url_path = so_object_paths(account_id, bucket_name, key)
+        return self._ctx.transport.data_plane_request(
+            "so",
+            "GET",
+            f"{sign_path}/metadata",
+            account_id,
+            url_path=f"{url_path}/metadata",
+        )
+
+    def _remote_objects_for_sync(
+        self,
+        bucket_name: str,
+        prefix_clean: str,
+    ) -> dict[str, dict[str, Any]]:
+        remote_items = self.list_all_objects(
+            bucket_name,
+            prefix=prefix_clean,
+            recursive=True,
+        )
+        remote_by_key = {item["key"]: item for item in remote_items}
+        # List API omits the object when prefix equals the exact key (folder placeholder filter).
+        if not remote_by_key and prefix_clean and not prefix_clean.endswith("/"):
+            try:
+                meta = self.object_metadata(bucket_name, prefix_clean)
+            except HomeCloudError:
+                return remote_by_key
+            remote_by_key[prefix_clean] = {
+                "key": prefix_clean,
+                "size": int(meta.get("size") or 0),
+                "is_dir": False,
+            }
+        return remote_by_key
 
     def list_all_objects(
         self,
@@ -240,6 +281,9 @@ class SoAPI:
         on_skip: Callable[[str], None] | None = None,
         on_delete: Callable[[str], None] | None = None,
         on_begin: Callable[[int], None] | None = None,
+        on_transfer_begin: Callable[[int, int], None] | None = None,
+        on_bytes: Callable[[int], None] | None = None,
+        on_file_begin: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
     ) -> dict[str, int]:
         """Upload local directory to bucket (one-way). Overwrites by default; use skip=True to skip same-size keys."""
@@ -280,10 +324,13 @@ class SoAPI:
         )
 
         total_ops = len(to_upload) + len(to_skip) + len(to_delete)
+        transfer_bytes = sum(local_files[key].stat().st_size for key in to_upload)
         if on_status is not None:
             on_status(f"scan  {len(local_files)} local, {len(remote_by_key)} remote, {total_ops} operations")
         if on_begin is not None:
             on_begin(total_ops)
+        if on_transfer_begin is not None:
+            on_transfer_begin(transfer_bytes, len(to_upload))
 
         skipped = 0
         for key in to_skip:
@@ -293,7 +340,9 @@ class SoAPI:
 
         def do_upload(key: str) -> None:
             path = local_files[key]
-            self.upload(bucket_name, path.as_posix(), key=key)
+            if on_file_begin is not None:
+                on_file_begin(key)
+            self.upload(bucket_name, path.as_posix(), key=key, on_bytes=on_bytes)
             if on_upload is not None:
                 on_upload(key)
 
@@ -325,6 +374,9 @@ class SoAPI:
         on_skip: Callable[[str], None] | None = None,
         on_delete: Callable[[str], None] | None = None,
         on_begin: Callable[[int], None] | None = None,
+        on_transfer_begin: Callable[[int, int], None] | None = None,
+        on_bytes: Callable[[int], None] | None = None,
+        on_file_begin: Callable[[str], None] | None = None,
         on_status: Callable[[str], None] | None = None,
     ) -> dict[str, int]:
         """Download bucket prefix to local directory. Overwrites by default; use skip=True to skip same-size files."""
@@ -334,12 +386,7 @@ class SoAPI:
             raise HomeCloudError(f"Not a directory: {local_dir}")
 
         prefix_clean = prefix.strip("/")
-        remote_items = self.list_all_objects(
-            bucket_name,
-            prefix=prefix_clean,
-            recursive=True,
-        )
-        remote_by_key = {item["key"]: item for item in remote_items}
+        remote_by_key = self._remote_objects_for_sync(bucket_name, prefix_clean)
 
         local_files: dict[str, Path] = {}
         if root.exists():
@@ -373,12 +420,15 @@ class SoAPI:
         )
 
         total_ops = len(to_download) + len(to_skip) + len(to_delete)
+        transfer_bytes = sum(int(remote_by_key[key].get("size") or 0) for key in to_download)
         if on_status is not None:
             on_status(
                 f"scan  {len(remote_by_key)} remote, {len(local_files)} local, {total_ops} operations"
             )
         if on_begin is not None:
             on_begin(total_ops)
+        if on_transfer_begin is not None:
+            on_transfer_begin(transfer_bytes, len(to_download))
 
         skipped = 0
         for key in to_skip:
@@ -389,7 +439,9 @@ class SoAPI:
         def do_download(key: str) -> None:
             rel = sync_relative_local_path(key, prefix_clean)
             dest = root / rel
-            self.download(bucket_name, key, dest_path=dest)
+            if on_file_begin is not None:
+                on_file_begin(key)
+            self.download(bucket_name, key, dest_path=dest, on_bytes=on_bytes)
             local_files[key] = dest
             if on_download is not None:
                 on_download(key)
