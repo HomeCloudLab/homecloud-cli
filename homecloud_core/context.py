@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import time
+import webbrowser
+from collections.abc import Callable
 from typing import Any
 
 from homecloud_core.account import remember_account, resolve_account_id
@@ -13,6 +16,7 @@ from homecloud_core.config import (
 )
 from homecloud_core.defaults import DEFAULT_PROFILE, platform_apex
 from homecloud_core.errors import HomeCloudError, NotConfiguredError
+from homecloud_core.mfa import MfaResolver
 from homecloud_core.session import (
     get_access_token,
     load_session,
@@ -23,7 +27,14 @@ from homecloud_core.transport import Transport
 
 
 class CoreContext:
-    def __init__(self, profile_name: str | None = None) -> None:
+    def __init__(
+        self,
+        profile_name: str | None = None,
+        *,
+        mfa_code: str | None = None,
+        mfa_prompt: Callable[[str], str] | None = None,
+        interactive_mfa: bool = True,
+    ) -> None:
         self.profile_name = profile_name or os.environ.get("HOMECLOUD_PROFILE", DEFAULT_PROFILE)
         try:
             credentials = load_credentials()
@@ -33,11 +44,19 @@ class CoreContext:
         self._session = load_session().get(self.profile_name)
         self._apply_env_overrides()
         self._account_id: str | None = None
+        self._mfa_prompt = mfa_prompt
+        self._interactive_mfa = interactive_mfa
+        self._mfa_resolver = MfaResolver(
+            mfa_code=mfa_code,
+            prompt=mfa_prompt,
+            interactive=interactive_mfa,
+        )
         self._transport = Transport(
             apex=self.profile.apex,
             access_key_id=self.profile.access_key_id,
             secret_access_key=self.profile.secret_access_key,
             access_token=self._session.access_token,
+            mfa_resolver=self._mfa_resolver,
         )
 
     def _apply_env_overrides(self) -> None:
@@ -71,20 +90,81 @@ class CoreContext:
         self._account_id = account_id
         return account_id
 
-    def login(self, username: str, password: str) -> None:
+    def _apply_access_token(self, token: str) -> None:
+        set_access_token(self.profile_name, token)
+        self._transport.access_token = token
+        self._session = load_session().get(self.profile_name)
+        self._auto_select_account()
+
+    def login(self, username: str, password: str, *, mfa_code: str | None = None) -> None:
+        if mfa_code:
+            self._mfa_resolver = MfaResolver(
+                mfa_code=mfa_code,
+                prompt=self._mfa_prompt,
+                interactive=self._interactive_mfa,
+            )
+            self._transport.set_mfa_resolver(self._mfa_resolver)
+
+        body: dict[str, Any] = {"username": username, "password": password}
+        if mfa_code:
+            body["mfa_code"] = mfa_code
+
         data = self._transport.console_request(
             "POST",
             "auth/login",
-            json={"username": username, "password": password},
+            json=body,
             require_auth=False,
         )
         token = data.get("access_token")
         if not token:
             raise HomeCloudError("Login failed")
-        set_access_token(self.profile_name, token)
-        self._transport.access_token = token
-        self._session = load_session().get(self.profile_name)
-        self._auto_select_account()
+        self._apply_access_token(str(token))
+
+    def login_browser(
+        self,
+        *,
+        open_browser: bool = True,
+        on_waiting: Callable[[str], None] | None = None,
+    ) -> None:
+        """Start browser login and poll until JWT is ready."""
+        start = self._transport.console_request(
+            "POST",
+            "auth/cli/session",
+            require_auth=False,
+        )
+        session_id = start.get("session_id")
+        verification_uri = start.get("verification_uri")
+        if not session_id or not verification_uri:
+            raise HomeCloudError("Failed to start browser login session")
+
+        expires_in = int(start.get("expires_in") or 600)
+        interval = max(1, int(start.get("interval") or 2))
+        deadline = time.monotonic() + expires_in
+
+        if open_browser:
+            webbrowser.open(str(verification_uri))
+        if on_waiting:
+            on_waiting(str(verification_uri))
+
+        while time.monotonic() < deadline:
+            poll = self._transport.console_request(
+                "GET",
+                f"auth/cli/session/{session_id}",
+                require_auth=False,
+                _skip_mfa=True,
+            )
+            status = str(poll.get("status") or "")
+            if status == "complete":
+                token = poll.get("access_token")
+                if not token:
+                    raise HomeCloudError("Browser login completed without access token")
+                self._apply_access_token(str(token))
+                return
+            if status == "expired":
+                raise HomeCloudError("Browser login session expired")
+            time.sleep(interval)
+
+        raise HomeCloudError("Browser login timed out")
 
     def _auto_select_account(self) -> None:
         if self._session.active_account_id or self.profile.default_account_id:

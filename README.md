@@ -22,6 +22,7 @@ Direct binary URLs: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md)
 homecloud version
 homecloud configure
 homecloud login
+homecloud login --browser   # passkeys / security keys
 homecloud apps list
 homecloud mq send orders --body '{"id": 1}'
 homecloud so ls my-bucket

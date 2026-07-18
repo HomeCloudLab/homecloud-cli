@@ -31,14 +31,19 @@ class Transport:
         secret_access_key: str | None,
         access_token: str | None,
         timeout: float = 30.0,
+        mfa_resolver: Any | None = None,
     ) -> None:
         self.apex = apex
         self.access_key_id = access_key_id
         self.secret_access_key = secret_access_key
         self.access_token = access_token
         self.timeout = timeout
+        self._mfa_resolver = mfa_resolver
         self._http_client: httpx.Client | None = None
         self._http_lock = threading.Lock()
+
+    def set_mfa_resolver(self, resolver: Any | None) -> None:
+        self._mfa_resolver = resolver
 
     def _http(self) -> httpx.Client:
         with self._http_lock:
@@ -63,6 +68,7 @@ class Transport:
         json: Any | None = None,
         params: dict[str, Any] | None = None,
         require_auth: bool = True,
+        _skip_mfa: bool = False,
     ) -> Any:
         if require_auth and not self.access_token:
             raise NotLoggedInError("Not logged in. Run: homecloud login")
@@ -72,7 +78,41 @@ class Transport:
             headers["Authorization"] = f"Bearer {self.access_token}"
 
         url = urljoin(console_url(self.apex).rstrip("/") + "/", path.lstrip("/"))
-        return self._request(method, url, headers=headers, json=json, params=params)
+        try:
+            return self._request(method, url, headers=headers, json=json, params=params)
+        except HomeCloudError as exc:
+            if _skip_mfa or self._mfa_resolver is None:
+                raise
+            from homecloud_core.mfa import is_mfa_required
+
+            if not is_mfa_required(exc):
+                raise
+
+            def retry(
+                retry_method: str,
+                retry_path: str,
+                *,
+                json: Any | None = None,
+                require_auth: bool = True,
+                _skip_mfa: bool = True,
+                **_kwargs: Any,
+            ) -> Any:
+                return self.console_request(
+                    retry_method,
+                    retry_path,
+                    json=json,
+                    params=params,
+                    require_auth=require_auth,
+                    _skip_mfa=_skip_mfa,
+                )
+
+            return self._mfa_resolver.resolve(
+                exc,
+                method=method,
+                path=path,
+                json_body=json,
+                retry=retry,
+            )
 
     def data_plane_request_bytes(
         self,

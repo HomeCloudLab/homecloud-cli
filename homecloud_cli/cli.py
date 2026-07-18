@@ -43,8 +43,18 @@ def _profile_option(profile: Optional[str]) -> str | None:
     return profile
 
 
-def _client(profile: Optional[str]) -> HomeCloudClient:
-    return HomeCloudClient(profile=profile)
+def _client(
+    profile: Optional[str],
+    *,
+    mfa_code: Optional[str] = None,
+    interactive_mfa: bool = True,
+) -> HomeCloudClient:
+    return HomeCloudClient(
+        profile=profile,
+        mfa_code=mfa_code,
+        interactive_mfa=interactive_mfa,
+        mfa_prompt=lambda msg: typer.prompt(msg),
+    )
 
 
 def _output_option(output: str) -> str:
@@ -231,16 +241,36 @@ def login(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     username: Annotated[Optional[str], typer.Option(help="Console username")] = None,
     password: Annotated[Optional[str], typer.Option(help="Password", hide_input=True)] = None,
+    mfa_code: Annotated[
+        Optional[str],
+        typer.Option("--mfa-code", help="TOTP or backup code (non-interactive MFA)"),
+    ] = None,
+    browser: Annotated[
+        bool,
+        typer.Option("--browser", help="Open Console in a browser (passkeys / security keys)"),
+    ] = False,
 ) -> None:
-    client = _client(profile)
+    """Sign in to the Console API (JWT). Supports MFA and browser/passkey login."""
+    client = _client(profile, mfa_code=mfa_code)
     try:
-        client.login(
-            username or typer.prompt("Username"),
-            password or typer.prompt("Password", hide_input=True),
-        )
+        if browser:
+            typer.echo("Opening browser...")
+
+            def _on_waiting(uri: str) -> None:
+                typer.echo("Complete authentication in your browser.")
+                typer.echo(f"  {uri}")
+                typer.echo("Waiting for authentication...")
+
+            client.login_browser(open_browser=True, on_waiting=_on_waiting)
+        else:
+            client.login(
+                username or typer.prompt("Username"),
+                password or typer.prompt("Password", hide_input=True),
+                mfa_code=mfa_code,
+            )
     except HomeCloudError as exc:
         _handle_error(exc)
-    typer.echo("Logged in.")
+    typer.echo("✓ Logged in")
 
 
 @accounts_app.command("list")

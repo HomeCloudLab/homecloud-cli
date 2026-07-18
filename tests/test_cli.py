@@ -247,6 +247,154 @@ def test_login_sends_username(
     assert captured["json"] == {"username": "alice", "password": "secret123"}
 
 
+def test_login_mfa_prompt_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+    calls: list[dict[str, object]] = []
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method: str, url: str, **kwargs):
+            body = kwargs.get("json") or {}
+            calls.append({"method": method, "url": url, "json": body})
+            if method == "GET" and url.rstrip("/").endswith("accounts"):
+                return httpx.Response(200, json={"items": []})
+            if method == "POST" and "auth/login" in url and "mfa_token" not in body:
+                return httpx.Response(
+                    403,
+                    json={
+                        "error": {
+                            "code": "MFA_REQUIRED",
+                            "message": "Second factor required",
+                            "details": {
+                                "mfa_token": "pending-token",
+                                "methods": ["totp"],
+                            },
+                        }
+                    },
+                )
+            if method == "POST" and "auth/login" in url and body.get("mfa_token"):
+                return httpx.Response(200, json={"access_token": "tok-mfa"})
+            return httpx.Response(500, json={"detail": "unexpected"})
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    result = runner.invoke(
+        app,
+        ["login", "--username", "alice", "--password", "secret123"],
+        input="654321\n",
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert any(c["json"].get("mfa_token") == "pending-token" for c in calls)
+    assert any(c["json"].get("mfa_code") == "654321" for c in calls)
+
+
+def test_login_mfa_code_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+    captured: dict[str, object] = {}
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method: str, url: str, **kwargs):
+            if method == "POST" and "auth/login" in url:
+                captured["json"] = kwargs.get("json")
+            return httpx.Response(200, json={"access_token": "tok-1"})
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "login",
+            "--username",
+            "alice",
+            "--password",
+            "secret123",
+            "--mfa-code",
+            "111222",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert captured["json"] == {
+        "username": "alice",
+        "password": "secret123",
+        "mfa_code": "111222",
+    }
+
+
+def test_login_browser_poll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("homecloud_core.context.webbrowser.open", lambda *_a, **_k: True)
+    polls = {"n": 0}
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method: str, url: str, **kwargs):
+            if method == "GET" and url.rstrip("/").endswith("accounts"):
+                return httpx.Response(200, json={"items": []})
+            if method == "POST" and url.rstrip("/").endswith("auth/cli/session"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "session_id": "sess-1",
+                        "verification_uri": "https://console.example.test/auth/cli?session=sess-1",
+                        "expires_in": 60,
+                        "interval": 1,
+                    },
+                )
+            if method == "GET" and "auth/cli/session/sess-1" in url:
+                polls["n"] += 1
+                if polls["n"] == 1:
+                    return httpx.Response(200, json={"status": "pending"})
+                return httpx.Response(
+                    200,
+                    json={"status": "complete", "access_token": "tok-browser"},
+                )
+            return httpx.Response(500, json={"detail": "unexpected"})
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    result = runner.invoke(app, ["login", "--browser"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "Logged in" in (result.stdout + result.stderr)
+    assert polls["n"] >= 2
+
+
 def test_so_sync_uploads_new_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

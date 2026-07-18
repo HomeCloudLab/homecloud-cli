@@ -11,8 +11,20 @@ from homecloud_sdk.services import AccountsAPI, AppsAPI, MqAPI, QueuesAPI, Secre
 class HomeCloudClient:
     """AWS-style client — no auth, account, or endpoint parameters."""
 
-    def __init__(self, profile: str | None = None) -> None:
-        self._ctx = CoreContext(profile)
+    def __init__(
+        self,
+        profile: str | None = None,
+        *,
+        mfa_code: str | None = None,
+        interactive_mfa: bool = True,
+        mfa_prompt: Any | None = None,
+    ) -> None:
+        self._ctx = CoreContext(
+            profile,
+            mfa_code=mfa_code,
+            mfa_prompt=mfa_prompt,
+            interactive_mfa=interactive_mfa,
+        )
 
     @classmethod
     def from_profile(cls, profile: str) -> HomeCloudClient:
@@ -47,8 +59,16 @@ class HomeCloudClient:
     def secrets(self) -> SecretsAPI:
         return SecretsAPI(self._ctx)
 
-    def login(self, username: str, password: str) -> None:
-        self._ctx.login(username, password)
+    def login(self, username: str, password: str, *, mfa_code: str | None = None) -> None:
+        self._ctx.login(username, password, mfa_code=mfa_code)
+
+    def login_browser(
+        self,
+        *,
+        open_browser: bool = True,
+        on_waiting: Any | None = None,
+    ) -> None:
+        self._ctx.login_browser(open_browser=open_browser, on_waiting=on_waiting)
 
     def configure(
         self,
