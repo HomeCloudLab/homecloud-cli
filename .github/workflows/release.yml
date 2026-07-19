@@ -34,12 +34,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout SDK (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: HomeCloudLab/homecloud-sdk
+          path: _homecloud-sdk
+          token: ${{ secrets.HOMECLOUD_SDK_TOKEN || github.token }}
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      - name: Install SDK before binary build
+        run: pip install -e ./_homecloud-sdk
+
       - name: Build binary
         run: ${{ matrix.script }}
+        env:
+          HOMECLOUD_SDK_ROOT: ${{ github.workspace }}/_homecloud-sdk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

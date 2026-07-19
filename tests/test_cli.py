@@ -18,11 +18,11 @@ def runner() -> CliRunner:
 def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.19" in result.stdout
+    assert "0.2.20" in result.stdout
 
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "homecloud 0.2.19" in result.stdout
+    assert "homecloud 0.2.20" in result.stdout
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
@@ -298,6 +298,31 @@ def test_login_mfa_prompt_completes(
     assert result.exit_code == 0, result.stdout + result.stderr
     assert any(c["json"].get("mfa_token") == "pending-token" for c in calls)
     assert any(c["json"].get("mfa_code") == "654321" for c in calls)
+
+
+def test_select_mfa_method_prefers_totp_when_both(monkeypatch: pytest.MonkeyPatch) -> None:
+    from homecloud_cli.prompts import select_mfa_method
+
+    monkeypatch.setattr("homecloud_cli.prompts.is_interactive", lambda: False)
+    choice = select_mfa_method(
+        ["totp", "passkey"],
+        passkeys=[{"id": "1", "nickname": "YubiKey"}],
+    )
+    assert choice == "totp"
+
+
+def test_mfa_resolver_prefer_browser() -> None:
+    from homecloud_core.mfa import MfaResolver, PreferBrowserLogin
+
+    resolver = MfaResolver(
+        interactive=True,
+        choose_method=lambda _m, _p: "browser",
+    )
+    try:
+        resolver.obtain_code(methods=["totp", "passkey"], allow_browser_switch=True)
+        raise AssertionError("expected PreferBrowserLogin")
+    except PreferBrowserLogin:
+        pass
 
 
 def test_login_mfa_code_flag(

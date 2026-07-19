@@ -10,11 +10,23 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout CLI
+        uses: actions/checkout@v4
+
+      - name: Checkout SDK (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: HomeCloudLab/homecloud-sdk
+          path: _homecloud-sdk
+          token: ${{ secrets.HOMECLOUD_SDK_TOKEN || github.token }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - run: pip install -e ".[dev]"
+      - name: Install SDK + CLI
+        run: |
+          pip install -e ./_homecloud-sdk
+          pip install -e ".[dev]"
+
       - run: pytest tests/ -q

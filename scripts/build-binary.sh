@@ -6,8 +6,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="${ROOT}/dist"
 VERSION="$(python -c "import importlib.util; spec=importlib.util.spec_from_file_location('v','${ROOT}/homecloud_cli/__init__.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(m.__version__)")"
 
-if [[ ! -f "${ROOT}/homecloud_core/__init__.py" || ! -f "${ROOT}/homecloud_sdk/__init__.py" ]]; then
-  echo "Vendored SDK packages missing (homecloud_core, homecloud_sdk)." >&2
+# Prefer sibling checkout, then CI path, then already-installed package
+SDK_ROOT="${HOMECLOUD_SDK_ROOT:-}"
+if [[ -z "${SDK_ROOT}" && -f "${ROOT}/../homecloud-sdk/pyproject.toml" ]]; then
+  SDK_ROOT="$(cd "${ROOT}/../homecloud-sdk" && pwd)"
+fi
+if [[ -z "${SDK_ROOT}" && -f "${ROOT}/_homecloud-sdk/pyproject.toml" ]]; then
+  SDK_ROOT="${ROOT}/_homecloud-sdk"
+fi
+
+if [[ -n "${SDK_ROOT}" ]]; then
+  echo "Installing SDK from ${SDK_ROOT}..."
+  python -m pip install -q -e "${SDK_ROOT}"
+elif ! python -c "import homecloud_sdk" 2>/dev/null; then
+  echo "homecloud-sdk not found. Set HOMECLOUD_SDK_ROOT or place ../homecloud-sdk next to this repo." >&2
   exit 1
 fi
 
@@ -31,7 +43,7 @@ fi
 
 echo "Building ${ARTIFACT} (v${VERSION})..."
 
-export HOMECLOUD_SDK_ROOT="${ROOT}"
+export HOMECLOUD_SDK_ROOT="${SDK_ROOT:-$(python -c 'import homecloud_sdk, pathlib; print(pathlib.Path(homecloud_sdk.__file__).resolve().parents[1])')}"
 python -m pip install -q -e "${ROOT}[build]"
 rm -rf "${DIST}/build" "${DIST}/${ARTIFACT}" "${DIST}/${ARTIFACT}.sha256"
 

@@ -6,13 +6,35 @@ $Dist = Join-Path $Root "dist"
 $Version = (Get-Content (Join-Path $Root "homecloud_cli\__init__.py") | Select-String '__version__ = "(.+)"').Matches.Groups[1].Value
 $Artifact = "homecloud-windows-amd64.exe"
 
-if (-not (Test-Path (Join-Path $Root "homecloud_core\__init__.py"))) {
-    throw "Vendored SDK missing: homecloud_core"
+$SdkRoot = $env:HOMECLOUD_SDK_ROOT
+if (-not $SdkRoot) {
+    $sibling = Join-Path (Split-Path -Parent $Root) "homecloud-sdk"
+    if (Test-Path (Join-Path $sibling "pyproject.toml")) {
+        $SdkRoot = $sibling
+    }
+}
+if (-not $SdkRoot) {
+    $ciPath = Join-Path $Root "_homecloud-sdk"
+    if (Test-Path (Join-Path $ciPath "pyproject.toml")) {
+        $SdkRoot = $ciPath
+    }
+}
+
+if ($SdkRoot) {
+    Write-Host "Installing SDK from $SdkRoot..."
+    python -m pip install -q -e $SdkRoot
+} else {
+    python -c "import homecloud_sdk" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "homecloud-sdk not found. Set HOMECLOUD_SDK_ROOT or place ../homecloud-sdk next to this repo."
+    }
 }
 
 Write-Host "Building $Artifact (v$Version)..."
 
-$env:HOMECLOUD_SDK_ROOT = $Root
+if ($SdkRoot) {
+    $env:HOMECLOUD_SDK_ROOT = $SdkRoot
+}
 python -m pip install -q -e "${Root}[build]"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $Dist "build")
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $Dist $Artifact)

@@ -1,6 +1,7 @@
 # homecloud-cli
 
-Thin command-line wrapper over `homecloud-sdk`, distributed as a **single binary** (no Python required for end users).
+Thin command-line wrapper over [`homecloud-sdk`](https://github.com/HomeCloudLab/homecloud-sdk),
+distributed as a **single binary** (no Python required for end users).
 
 ## End users — install
 
@@ -32,16 +33,26 @@ See [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for release pipeline and [docs/
 
 ## Developers — source install
 
-SDK core (`homecloud_core`, `homecloud_sdk`) is **vendored in this repo** for standalone binary builds (no cross-repo checkout in CI).
-
-Sync from `homecloud-sdk` when updating core logic, then commit here.
+This repo contains **only** `homecloud_cli` (Typer / Rich UI). Auth, HTTP, signing,
+and SO/MQ live in the separate `homecloud-sdk` package.
 
 ```bash
-pip install -e ".[dev]"
+# From a checkout that has both repos as siblings:
+#   .../homecloud-sdk
+#   .../homecloud-cli
+pip install -e ../homecloud-sdk -e ".[dev]"
 pytest tests/ -q
 ```
 
+After PyPI publish:
+
+```bash
+pip install -e ".[dev]"   # pulls homecloud-sdk from PyPI
+```
+
 ## Build standalone binary
+
+PyInstaller bundles the installed `homecloud-sdk` + this CLI into one executable:
 
 ```bash
 pip install -e ../homecloud-sdk -e ".[build]"
@@ -52,4 +63,4 @@ pip install -e ../homecloud-sdk -e ".[build]"
 
 ## What CLI does NOT contain
 
-HTTP, auth, signing, account resolution, or endpoint routing — all in `homecloud-sdk` → `homecloud_core`.
+HTTP, auth, signing, account resolution, or endpoint routing — all in `homecloud-sdk`.

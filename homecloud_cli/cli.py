@@ -49,12 +49,29 @@ def _client(
     mfa_code: Optional[str] = None,
     interactive_mfa: bool = True,
 ) -> HomeCloudClient:
+    from homecloud_cli.prompts import select_mfa_method
+
+    def _choose_mfa(methods: list[str], passkeys: list[dict] | None) -> str:
+        return select_mfa_method(methods, passkeys=passkeys)
+
     return HomeCloudClient(
         profile=profile,
         mfa_code=mfa_code,
         interactive_mfa=interactive_mfa,
         mfa_prompt=lambda msg: typer.prompt(msg),
+        mfa_choose_method=_choose_mfa if interactive_mfa else None,
     )
+
+
+def _run_browser_login(client: HomeCloudClient) -> None:
+    typer.echo("Opening browser...")
+
+    def _on_waiting(uri: str) -> None:
+        typer.echo("Complete authentication in your browser.")
+        typer.echo(f"  {uri}")
+        typer.echo("Waiting for authentication...")
+
+    client.login_browser(open_browser=True, on_waiting=_on_waiting)
 
 
 def _output_option(output: str) -> str:
@@ -250,24 +267,36 @@ def login(
         typer.Option("--browser", help="Open Console in a browser (passkeys / security keys)"),
     ] = False,
 ) -> None:
-    """Sign in to the Console API (JWT). Supports MFA and browser/passkey login."""
+    """Sign in to the Console API (JWT). Interactive menus for login mode and MFA method."""
+    from homecloud_cli.prompts import is_interactive, select_login_mode
+    from homecloud_core.mfa import PreferBrowserLogin
+
     client = _client(profile, mfa_code=mfa_code)
+    use_browser = browser
+
+    # Interactive: arrow-key choose terminal vs browser (unless flags already decided).
+    if (
+        not use_browser
+        and mfa_code is None
+        and is_interactive()
+        and username is None
+        and password is None
+    ):
+        use_browser = select_login_mode(default="terminal") == "browser"
+
     try:
-        if browser:
-            typer.echo("Opening browser...")
-
-            def _on_waiting(uri: str) -> None:
-                typer.echo("Complete authentication in your browser.")
-                typer.echo(f"  {uri}")
-                typer.echo("Waiting for authentication...")
-
-            client.login_browser(open_browser=True, on_waiting=_on_waiting)
+        if use_browser:
+            _run_browser_login(client)
         else:
-            client.login(
-                username or typer.prompt("Username"),
-                password or typer.prompt("Password", hide_input=True),
-                mfa_code=mfa_code,
-            )
+            try:
+                client.login(
+                    username or typer.prompt("Username"),
+                    password or typer.prompt("Password", hide_input=True),
+                    mfa_code=mfa_code,
+                )
+            except PreferBrowserLogin:
+                typer.echo("Switching to browser login for passkey / security key…")
+                _run_browser_login(client)
     except HomeCloudError as exc:
         _handle_error(exc)
     typer.echo("✓ Logged in")

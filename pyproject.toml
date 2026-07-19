@@ -1,12 +1,14 @@
 [project]
 name = "homecloud-cli"
-version = "0.2.19"
+version = "0.2.20"
 description = "HomeCloud command-line interface"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "homecloud-sdk>=0.3.2",
     "httpx>=0.28.0",
     "pyyaml>=6.0.2",
+    "questionary>=2.0.0",
     "rich>=13.9.0",
     "typer>=0.15.0",
 ]
@@ -29,7 +31,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["homecloud_cli*", "homecloud_core*", "homecloud_sdk*"]
+include = ["homecloud_cli*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
