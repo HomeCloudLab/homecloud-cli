@@ -18,11 +18,11 @@ def runner() -> CliRunner:
 def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.20" in result.stdout
+    assert "0.2.21" in result.stdout
 
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "homecloud 0.2.20" in result.stdout
+    assert "homecloud 0.2.21" in result.stdout
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
@@ -319,10 +319,14 @@ def test_mfa_resolver_prefer_browser() -> None:
         choose_method=lambda _m, _p: "browser",
     )
     try:
-        resolver.obtain_code(methods=["totp", "passkey"], allow_browser_switch=True)
+        resolver.obtain_code(
+            methods=["totp", "passkey"],
+            allow_browser_switch=True,
+            mfa_token="pending-xyz",
+        )
         raise AssertionError("expected PreferBrowserLogin")
-    except PreferBrowserLogin:
-        pass
+    except PreferBrowserLogin as exc:
+        assert exc.mfa_token == "pending-xyz"
 
 
 def test_login_mfa_code_flag(

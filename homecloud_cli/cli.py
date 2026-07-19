@@ -63,15 +63,21 @@ def _client(
     )
 
 
-def _run_browser_login(client: HomeCloudClient) -> None:
-    typer.echo("Opening browser...")
+def _run_browser_login(client: HomeCloudClient, *, mfa_token: str | None = None) -> None:
+    if mfa_token:
+        typer.echo("Opening browser for passkey…")
+    else:
+        typer.echo("Opening browser...")
 
     def _on_waiting(uri: str) -> None:
-        typer.echo("Complete authentication in your browser.")
+        if mfa_token:
+            typer.echo("Complete passkey authentication in your browser (password already verified).")
+        else:
+            typer.echo("Complete authentication in your browser.")
         typer.echo(f"  {uri}")
         typer.echo("Waiting for authentication...")
 
-    client.login_browser(open_browser=True, on_waiting=_on_waiting)
+    client.login_browser(open_browser=True, on_waiting=_on_waiting, mfa_token=mfa_token)
 
 
 def _output_option(output: str) -> str:
@@ -294,9 +300,9 @@ def login(
                     password or typer.prompt("Password", hide_input=True),
                     mfa_code=mfa_code,
                 )
-            except PreferBrowserLogin:
-                typer.echo("Switching to browser login for passkey / security key…")
-                _run_browser_login(client)
+            except PreferBrowserLogin as exc:
+                typer.echo("Switching to browser for passkey / security key…")
+                _run_browser_login(client, mfa_token=exc.mfa_token)
     except HomeCloudError as exc:
         _handle_error(exc)
     typer.echo("✓ Logged in")
