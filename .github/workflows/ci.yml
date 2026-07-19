@@ -18,7 +18,9 @@ jobs:
         with:
           repository: HomeCloudLab/homecloud-sdk
           path: _homecloud-sdk
-          token: ${{ secrets.HOMECLOUD_SDK_TOKEN || github.token }}
+          # Required: PAT (or fine-grained token) with read access to the private homecloud-sdk repo.
+          # github.token from homecloud-cli cannot see other private repos.
+          token: ${{ secrets.HOMECLOUD_SDK_TOKEN }}
 
       - uses: actions/setup-python@v5
         with:
