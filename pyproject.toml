@@ -1,11 +1,11 @@
 [project]
 name = "homecloud-cli"
-version = "0.2.23"
+version = "0.2.25"
 description = "HomeCloud command-line interface"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "homecloud-sdk>=0.4.6",
+    "homecloud-sdk>=0.4.7",
     "httpx>=0.28.0",
     "pyyaml>=6.0.2",
     "questionary>=2.0.0",

@@ -895,12 +895,33 @@ def fn_url(
 @fn_app.command("logs")
 def fn_logs(
     name: Annotated[str, typer.Argument(help="Function name")],
+    invocation_id: Annotated[
+        Optional[str],
+        typer.Option("--id", help="Invocation id — print full detail + logs"),
+    ] = None,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option("--output", "-o")] = "table",
 ) -> None:
-    """List recent invocations (console JWT)."""
+    """List recent invocations, or show one invocation's logs (console JWT)."""
     try:
-        items = _client(profile).functions.logs(name)
+        client = _client(profile)
+        if invocation_id:
+            detail = client.functions.get_invocation(name, invocation_id)
+            if output == "table":
+                console = Console()
+                console.print(
+                    f"[bold]{detail.get('status')}[/bold]  "
+                    f"trigger={detail.get('trigger_type')}  "
+                    f"duration={detail.get('duration_ms')}ms"
+                )
+                if detail.get("error_message"):
+                    console.print(f"[red]{detail['error_message']}[/red]")
+                logs = detail.get("logs") or ""
+                console.print(logs if str(logs).strip() else "(no logs)")
+                return
+            emit(detail, output_format=_output_option(output))
+            return
+        items = client.functions.logs(name)
         emit(
             items,
             output_format=_output_option(output),
@@ -910,12 +931,88 @@ def fn_logs(
         _handle_error(exc)
 
 
+@fn_app.command("watch")
+def fn_watch(
+    name: Annotated[str, typer.Argument(help="Function name")],
+    wait: Annotated[
+        int,
+        typer.Option(
+            "--wait",
+            "-w",
+            help="Seconds to wait for a new completed invocation before exit (0 = forever)",
+        ),
+    ] = 120,
+    poll: Annotated[
+        float,
+        typer.Option("--poll", help="Seconds between polls"),
+    ] = 2.0,
+    since_id: Annotated[
+        Optional[str],
+        typer.Option("--since-id", help="Only report invocations newer than this id"),
+    ] = None,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    """Wait for the next function invocation and print its logs when it finishes.
+
+    Logs are available after the run completes (not streamed mid-execution).
+    """
+    import time
+
+    try:
+        client = _client(profile)
+        console = Console()
+        items = client.functions.logs(name)
+        known = {str(i.get("id")) for i in items}
+        if since_id:
+            # Treat listed ids up to since_id as already seen; keep all current as known.
+            known.add(str(since_id))
+        deadline = None if wait <= 0 else time.monotonic() + wait
+        console.print(
+            f"Watching [bold]{name}[/bold] "
+            f"(wait={'forever' if wait <= 0 else f'{wait}s'}, poll={poll}s)…"
+        )
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                console.print(
+                    f"[yellow]No new invocation for {name} within {wait}s — exiting.[/yellow]"
+                )
+                raise SystemExit(1)
+            time.sleep(max(0.5, poll))
+            latest = client.functions.logs(name)
+            for item in latest:
+                iid = str(item.get("id") or "")
+                if not iid or iid in known:
+                    continue
+                status = str(item.get("status") or "")
+                if status in {"running", "pending"}:
+                    console.print(f"  … invocation {iid} status={status}")
+                    continue
+                known.add(iid)
+                console.print(
+                    f"[green]New invocation[/green] {iid}  "
+                    f"status={status}  trigger={item.get('trigger_type')}  "
+                    f"duration={item.get('duration_ms')}ms"
+                )
+                try:
+                    detail = client.functions.get_invocation(name, iid)
+                except HomeCloudError as exc:
+                    console.print(f"[red]Failed to load detail: {exc}[/red]")
+                    raise SystemExit(1) from exc
+                if detail.get("error_message"):
+                    console.print(f"[red]{detail['error_message']}[/red]")
+                logs = detail.get("logs") or ""
+                console.print(logs if str(logs).strip() else "(no logs)")
+                return
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
 @mail_app.command("mailboxes")
 def mail_mailboxes(
     profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
     output: Annotated[str, typer.Option("--output", "-o")] = "table",
 ) -> None:
-    """List mailboxes (requires console login)."""
+    """List mailboxes (Access Key with mail:* or console login)."""
     try:
         items = _client(profile).mail.list_mailboxes()
         emit(
