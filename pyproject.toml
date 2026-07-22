@@ -5,7 +5,7 @@ description = "HomeCloud command-line interface"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "homecloud-sdk>=0.4.4",
+    "homecloud-sdk>=0.4.5",
     "httpx>=0.28.0",
     "pyyaml>=6.0.2",
     "questionary>=2.0.0",

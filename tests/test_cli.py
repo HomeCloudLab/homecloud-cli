@@ -10,6 +10,11 @@ from typer.testing import CliRunner
 from homecloud_cli.cli import app
 
 
+def _httpx_response(method: str, url: str, status_code: int, **kwargs: object) -> httpx.Response:
+    """httpx>=0.28 requires Response.request to be set for error URL formatting."""
+    return httpx.Response(status_code, request=httpx.Request(method, url), **kwargs)
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
@@ -18,11 +23,11 @@ def runner() -> CliRunner:
 def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.21" in result.stdout
+    assert "0.2.22" in result.stdout
 
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "homecloud 0.2.21" in result.stdout
+    assert "homecloud 0.2.22" in result.stdout
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
@@ -201,7 +206,7 @@ def test_mq_send_unknown_queue_error(
             return False
 
         def request(self, method: str, url: str, **kwargs):
-            return httpx.Response(404, json={"detail": "Queue not found"})
+            return _httpx_response(method, url, 404, json={"detail": "Queue not found"})
 
     monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
 
@@ -269,9 +274,11 @@ def test_login_mfa_prompt_completes(
             body = kwargs.get("json") or {}
             calls.append({"method": method, "url": url, "json": body})
             if method == "GET" and url.rstrip("/").endswith("accounts"):
-                return httpx.Response(200, json={"items": []})
+                return _httpx_response(method, url, 200, json={"items": []})
             if method == "POST" and "auth/login" in url and "mfa_token" not in body:
-                return httpx.Response(
+                return _httpx_response(
+                    method,
+                    url,
                     403,
                     json={
                         "error": {
@@ -285,8 +292,8 @@ def test_login_mfa_prompt_completes(
                     },
                 )
             if method == "POST" and "auth/login" in url and body.get("mfa_token"):
-                return httpx.Response(200, json={"access_token": "tok-mfa"})
-            return httpx.Response(500, json={"detail": "unexpected"})
+                return _httpx_response(method, url, 200, json={"access_token": "tok-mfa"})
+            return _httpx_response(method, url, 500, json={"detail": "unexpected"})
 
     monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
 
