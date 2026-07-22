@@ -30,6 +30,7 @@ mq_app = typer.Typer(help="Message queue commands")
 
 so_app = typer.Typer(help="Object storage commands")
 fn_app = typer.Typer(help="Functions commands")
+mail_app = typer.Typer(help="Mail commands")
 
 app.add_typer(configure_app, name="configure")
 app.add_typer(config_app, name="config")
@@ -39,6 +40,7 @@ app.add_typer(queues_app, name="queues")
 app.add_typer(mq_app, name="mq")
 app.add_typer(so_app, name="so")
 app.add_typer(fn_app, name="fn")
+app.add_typer(mail_app, name="mail")
 
 
 def _profile_option(profile: Optional[str]) -> str | None:
@@ -904,6 +906,78 @@ def fn_logs(
             output_format=_output_option(output),
             columns=["id", "status", "trigger_type", "duration_ms", "created_at"],
         )
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@mail_app.command("mailboxes")
+def mail_mailboxes(
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "table",
+) -> None:
+    """List mailboxes (requires console login)."""
+    try:
+        items = _client(profile).mail.list_mailboxes()
+        emit(
+            items,
+            output_format=_output_option(output),
+            columns=["email", "status", "unread_count", "display_name", "id"],
+        )
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@mail_app.command("messages")
+def mail_messages(
+    mailbox_id: Annotated[Optional[str], typer.Option("--mailbox-id")] = None,
+    folder: Annotated[Optional[str], typer.Option("--folder")] = None,
+    limit: Annotated[int, typer.Option("--limit")] = 20,
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "table",
+) -> None:
+    """List message metadata (requires console login)."""
+    try:
+        data = _client(profile).mail.list_messages(
+            mailbox_id=mailbox_id,
+            folder=folder,
+            limit=limit,
+        )
+        emit(
+            data.get("items", []),
+            output_format=_output_option(output),
+            columns=["id", "subject", "from_address", "direction", "has_attachments", "created_at"],
+        )
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@mail_app.command("get")
+def mail_get(
+    message_id: Annotated[str, typer.Argument(help="Message id")],
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Fetch full message including HTML body and attachment metadata."""
+    try:
+        detail = _client(profile).mail.get_message(message_id)
+        emit(detail, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@mail_app.command("attachment")
+def mail_attachment(
+    message_id: Annotated[str, typer.Argument(help="Message id")],
+    part_id: Annotated[str, typer.Argument(help="Attachment part id")],
+    dest: Annotated[Path, typer.Option("--dest", "-d", help="Output file path")],
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+) -> None:
+    """Download one attachment to a local file."""
+    try:
+        raw = _client(profile).mail.download_attachment(message_id, part_id)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(raw)
+        typer.echo(f"Wrote {len(raw)} bytes to {dest}")
     except HomeCloudError as exc:
         _handle_error(exc)
 
