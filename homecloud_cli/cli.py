@@ -29,6 +29,7 @@ queues_app = typer.Typer(help="Queue commands")
 mq_app = typer.Typer(help="Message queue commands")
 
 so_app = typer.Typer(help="Object storage commands")
+fn_app = typer.Typer(help="Functions commands")
 
 app.add_typer(configure_app, name="configure")
 app.add_typer(config_app, name="config")
@@ -37,6 +38,7 @@ app.add_typer(apps_app, name="apps")
 app.add_typer(queues_app, name="queues")
 app.add_typer(mq_app, name="mq")
 app.add_typer(so_app, name="so")
+app.add_typer(fn_app, name="fn")
 
 
 def _profile_option(profile: Optional[str]) -> str | None:
@@ -818,6 +820,91 @@ def so_rm(
             prog.delete(target)
         return
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+
+
+@fn_app.command("list")
+def fn_list(
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="table|json|yaml")] = "table",
+) -> None:
+    """List functions (console JWT)."""
+    try:
+        items = _client(profile).functions.list()
+        emit(items, output_format=_output_option(output), columns=["name", "status", "runtime", "function_url"])
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@fn_app.command("invoke")
+def fn_invoke(
+    name: Annotated[str, typer.Argument(help="Function name")],
+    payload: Annotated[
+        Optional[str],
+        typer.Option("--payload", "-p", help="JSON event payload"),
+    ] = None,
+    payload_file: Annotated[
+        Optional[Path],
+        typer.Option("--payload-file", help="Path to JSON event file"),
+    ] = None,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Invoke via Function URL (Access Key HMAC)."""
+    try:
+        event: dict[str, Any] = {}
+        if payload_file is not None:
+            event = json.loads(payload_file.read_text(encoding="utf-8"))
+        elif payload:
+            event = json.loads(payload)
+        result = _client(profile).functions.invoke(name, event)
+        emit(result, output_format=_output_option(output))
+    except (HomeCloudError, json.JSONDecodeError, OSError) as exc:
+        _handle_error(exc)
+
+
+@fn_app.command("url")
+def fn_url(
+    name: Annotated[str, typer.Argument(help="Function name")],
+    enable: Annotated[bool, typer.Option("--enable", help="Enable Function URL")] = False,
+    disable: Annotated[bool, typer.Option("--disable", help="Disable Function URL")] = False,
+    public: Annotated[bool, typer.Option("--public", help="Allow anonymous invoke (danger)")] = False,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Show or enable/disable Function URL (console JWT)."""
+    try:
+        client = _client(profile)
+        if enable and disable:
+            raise typer.BadParameter("Use either --enable or --disable")
+        if enable:
+            if public:
+                typer.echo("WARNING: This function will be publicly accessible.", err=True)
+            result = client.functions.enable_url(name, public=public)
+        elif disable:
+            result = client.functions.disable_url(name)
+        else:
+            result = client.functions.url(name)
+        emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@fn_app.command("logs")
+def fn_logs(
+    name: Annotated[str, typer.Argument(help="Function name")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "table",
+) -> None:
+    """List recent invocations (console JWT)."""
+    try:
+        items = _client(profile).functions.logs(name)
+        emit(
+            items,
+            output_format=_output_option(output),
+            columns=["id", "status", "trigger_type", "duration_ms", "created_at"],
+        )
+    except HomeCloudError as exc:
         _handle_error(exc)
 
 
