@@ -101,7 +101,7 @@ def _repair_powershell_json(raw: str) -> str:
     return inner
 
 
-def _parse_mq_body(raw: str) -> dict[str, Any]:
+def _parse_mq_body(raw: str) -> dict[str, Any] | list[Any]:
     last_exc: json.JSONDecodeError | None = None
     for candidate in (raw, _repair_powershell_json(raw)):
         try:
@@ -109,14 +109,20 @@ def _parse_mq_body(raw: str) -> dict[str, Any]:
         except json.JSONDecodeError as exc:
             last_exc = exc
             continue
-        if not isinstance(parsed, dict):
-            raise typer.BadParameter("--body must be a JSON object")
-        return parsed
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            if not parsed:
+                raise typer.BadParameter("--body batch array must contain 1–10 messages")
+            if len(parsed) > 10:
+                raise typer.BadParameter("--body batch array supports at most 10 messages")
+            return parsed
+        raise typer.BadParameter("--body must be a JSON object or array")
     assert last_exc is not None
     raise last_exc
 
 
-def _load_mq_body(body: str, body_file: Path | None) -> dict[str, Any]:
+def _load_mq_body(body: str, body_file: Path | None) -> dict[str, Any] | list[Any]:
     if body_file is not None:
         return _parse_mq_body(body_file.read_text(encoding="utf-8"))
     return _parse_mq_body(body)
@@ -363,7 +369,10 @@ def queues_list(
 @mq_app.command("send")
 def mq_send(
     queue_name: Annotated[str, typer.Argument(help="Queue name")],
-    body: Annotated[str, typer.Option(help="JSON message body")] = "{}",
+    body: Annotated[
+        str,
+        typer.Option(help="JSON message body (object) or batch array (1–10 messages)"),
+    ] = "{}",
     body_file: Annotated[
         Optional[Path],
         typer.Option("--body-file", help="Read JSON message body from a file", exists=True, readable=True),

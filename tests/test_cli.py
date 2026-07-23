@@ -109,6 +109,75 @@ def test_mq_send_delegates_to_sdk(
     assert captured["path"] == "/acc-1/demo-queue/messages"
 
 
+def test_mq_send_batch_array(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "apex": "example.test",
+                        "default_account_id": "acc-1",
+                        "access_key_id": "HCAK1",
+                        "secret_access_key": "secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+
+    captured: dict[str, object] = {}
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method: str, url: str, **kwargs):
+            request = httpx.Request(method, url, headers=kwargs.get("headers"), json=kwargs.get("json"))
+            captured["method"] = request.method
+            captured["path"] = request.url.path
+            captured["json"] = kwargs.get("json")
+            return httpx.Response(
+                200,
+                json={"successful": [{"id": "0", "sequence": 1, "stream": "s", "subject": "s"}], "failed": []},
+            )
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    result = runner.invoke(
+        app,
+        ["mq", "send", "demo-queue", "--body", '[{"hello":"a"},{"hello":"b"}]', "--output", "json"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/acc-1/demo-queue/messages/batch"
+    assert isinstance(captured["json"], dict)
+    assert len(captured["json"]["entries"]) == 2  # type: ignore[index]
+
+
+def test_mq_send_batch_over_limit(runner: CliRunner) -> None:
+    body = json.dumps([{"i": i} for i in range(11)])
+    result = runner.invoke(app, ["mq", "send", "q", "--body", body])
+    assert result.exit_code != 0
+    combined = result.stdout + result.stderr
+    assert "10" in combined
+
+
 def test_mq_send_powershell_mangled_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
