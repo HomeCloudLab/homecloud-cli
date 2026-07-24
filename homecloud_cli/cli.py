@@ -421,6 +421,10 @@ def mq_receive(
     queue_name: Annotated[str, typer.Argument(help="Queue name")],
     max_messages: Annotated[int, typer.Option(help="Max messages (1-10)")] = 1,
     wait_seconds: Annotated[int, typer.Option(help="Long-poll wait (1-30s)")] = 20,
+    delete: Annotated[
+        bool,
+        typer.Option("--delete", help="Ack/delete immediately (skip visibility/inflight)"),
+    ] = False,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "json",
 ) -> None:
@@ -429,6 +433,7 @@ def mq_receive(
             queue_name,
             max_messages=max_messages,
             wait_seconds=wait_seconds,
+            delete=delete,
         )
     except HomeCloudError as exc:
         if exc.status_code == 404 and exc.detail == "Queue not found":
@@ -496,6 +501,10 @@ def mq_receive_dlq(
     queue_name: Annotated[str, typer.Argument(help="Queue name")],
     max_messages: Annotated[int, typer.Option(help="Max messages (1-10)")] = 1,
     wait_seconds: Annotated[int, typer.Option(help="Long-poll wait (1-30s)")] = 20,
+    delete: Annotated[
+        bool,
+        typer.Option("--delete", help="Ack/delete immediately (skip visibility/inflight)"),
+    ] = False,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "json",
 ) -> None:
@@ -504,6 +513,7 @@ def mq_receive_dlq(
             queue_name,
             max_messages=max_messages,
             wait_seconds=wait_seconds,
+            delete=delete,
         )
     except HomeCloudError as exc:
         if _mq_queue_not_found(exc, queue_name):

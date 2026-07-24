@@ -33,6 +33,8 @@ After `homecloud configure`:
 ```bash
 homecloud mq send test123 --body '{"smoke": true}'
 homecloud mq receive test123 --wait-seconds 5
+# Fast path: receive and ack in one call
+# homecloud mq receive test123 --max-messages 10 --delete
 homecloud so ls media
 homecloud so cp ./file.txt s3://media/path/file.txt
 homecloud so rm s3://media/path/file.txt
