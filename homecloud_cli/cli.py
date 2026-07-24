@@ -356,14 +356,31 @@ def apps_list(
 
 @queues_app.command("list")
 def queues_list(
+    live: Annotated[bool, typer.Option("--live", help="Include live depth/inflight/DLQ stats")] = False,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "table",
 ) -> None:
     try:
-        items = _client(profile).queues.list()
+        items = _client(profile).queues.list(live=live)
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
-    emit(items, output_format=_output_option(output), columns=["name", "status"])
+    columns = ["name", "status"]
+    if live:
+        columns = ["name", "status", "messages", "inflight", "dlq_messages"]
+    emit(items, output_format=_output_option(output), columns=columns)
+
+
+@queues_app.command("get")
+def queues_get(
+    queue_name: Annotated[str, typer.Argument(help="Queue name")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format")] = "json",
+) -> None:
+    try:
+        result = _client(profile).queues.get(queue_name)
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(result, output_format=_output_option(output))
 
 
 @mq_app.command("send")
@@ -425,6 +442,124 @@ def mq_receive(
     except (FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(items, output_format=_output_option(output))
+
+
+def _mq_queue_not_found(exc: HomeCloudError, queue_name: str) -> bool:
+    return exc.status_code == 404 and exc.detail == "Queue not found"
+
+
+@mq_app.command("delete")
+def mq_delete(
+    queue_name: Annotated[str, typer.Argument(help="Queue name")],
+    sequence: Annotated[int, typer.Argument(help="Message stream sequence")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    try:
+        _client(profile).mq.delete(queue_name, sequence)
+    except HomeCloudError as exc:
+        if _mq_queue_not_found(exc, queue_name):
+            _handle_error(
+                HomeCloudError(
+                    f"Queue '{queue_name}' not found. "
+                    "Create it in the console (Queues) or check the name with: homecloud queues list"
+                )
+            )
+        _handle_error(exc)
+    except (FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    typer.echo("deleted")
+
+
+@mq_app.command("purge")
+def mq_purge(
+    queue_name: Annotated[str, typer.Argument(help="Queue name")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    try:
+        _client(profile).mq.purge(queue_name)
+    except HomeCloudError as exc:
+        if _mq_queue_not_found(exc, queue_name):
+            _handle_error(
+                HomeCloudError(
+                    f"Queue '{queue_name}' not found. "
+                    "Create it in the console (Queues) or check the name with: homecloud queues list"
+                )
+            )
+        _handle_error(exc)
+    except (FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    typer.echo("purged")
+
+
+@mq_app.command("receive-dlq")
+def mq_receive_dlq(
+    queue_name: Annotated[str, typer.Argument(help="Queue name")],
+    max_messages: Annotated[int, typer.Option(help="Max messages (1-10)")] = 1,
+    wait_seconds: Annotated[int, typer.Option(help="Long-poll wait (1-30s)")] = 20,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format")] = "json",
+) -> None:
+    try:
+        items = _client(profile).mq.receive_dlq(
+            queue_name,
+            max_messages=max_messages,
+            wait_seconds=wait_seconds,
+        )
+    except HomeCloudError as exc:
+        if _mq_queue_not_found(exc, queue_name):
+            _handle_error(
+                HomeCloudError(
+                    f"Queue '{queue_name}' not found. "
+                    "Create it in the console (Queues) or check the name with: homecloud queues list"
+                )
+            )
+        _handle_error(exc)
+    except (FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(items, output_format=_output_option(output))
+
+
+@mq_app.command("delete-dlq")
+def mq_delete_dlq(
+    queue_name: Annotated[str, typer.Argument(help="Queue name")],
+    sequence: Annotated[int, typer.Argument(help="DLQ message stream sequence")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    try:
+        _client(profile).mq.delete_dlq(queue_name, sequence)
+    except HomeCloudError as exc:
+        if _mq_queue_not_found(exc, queue_name):
+            _handle_error(
+                HomeCloudError(
+                    f"Queue '{queue_name}' not found. "
+                    "Create it in the console (Queues) or check the name with: homecloud queues list"
+                )
+            )
+        _handle_error(exc)
+    except (FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    typer.echo("deleted")
+
+
+@mq_app.command("purge-dlq")
+def mq_purge_dlq(
+    queue_name: Annotated[str, typer.Argument(help="Queue name")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    try:
+        _client(profile).mq.purge_dlq(queue_name)
+    except HomeCloudError as exc:
+        if _mq_queue_not_found(exc, queue_name):
+            _handle_error(
+                HomeCloudError(
+                    f"Queue '{queue_name}' not found. "
+                    "Create it in the console (Queues) or check the name with: homecloud queues list"
+                )
+            )
+        _handle_error(exc)
+    except (FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    typer.echo("purged")
 
 
 def _is_so_uri(target: str) -> bool:
