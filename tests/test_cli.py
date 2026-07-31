@@ -315,10 +315,14 @@ def test_login_sends_username(
 
     result = runner.invoke(
         app,
-        ["login", "--username", "alice", "--password", "secret123"],
+        ["login", "--account", "default", "--username", "alice", "--password", "secret123"],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert captured["json"] == {"username": "alice", "password": "secret123"}
+    assert captured["json"] == {
+        "account": "default",
+        "username": "alice",
+        "password": "secret123",
+    }
 
 
 def test_login_mfa_prompt_completes(
@@ -368,7 +372,7 @@ def test_login_mfa_prompt_completes(
 
     result = runner.invoke(
         app,
-        ["login", "--username", "alice", "--password", "secret123"],
+        ["login", "--account", "default", "--username", "alice", "--password", "secret123"],
         input="654321\n",
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -434,6 +438,8 @@ def test_login_mfa_code_flag(
         app,
         [
             "login",
+            "--account",
+            "default",
             "--username",
             "alice",
             "--password",
@@ -444,6 +450,7 @@ def test_login_mfa_code_flag(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     assert captured["json"] == {
+        "account": "default",
         "username": "alice",
         "password": "secret123",
         "mfa_code": "111222",

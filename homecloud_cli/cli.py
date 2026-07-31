@@ -272,6 +272,9 @@ def config_show(
 @app.command("login")
 def login(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    account: Annotated[
+        Optional[str], typer.Option("--account", help="Account number or alias")
+    ] = None,
     username: Annotated[Optional[str], typer.Option(help="Console username")] = None,
     password: Annotated[Optional[str], typer.Option(help="Password", hide_input=True)] = None,
     mfa_code: Annotated[
@@ -283,7 +286,12 @@ def login(
         typer.Option("--browser", help="Open Console in a browser (passkeys / security keys)"),
     ] = False,
 ) -> None:
-    """Sign in to the Console API (JWT). Interactive menus for login mode and MFA method."""
+    """Sign in to the Console API (JWT). Interactive menus for login mode and MFA method.
+
+    Identity Reset Phase 1d: login is Account (number|alias) -> Username -> Password
+    -> MFA. ``--account`` is required for terminal login; browser login resolves it
+    on the Console login page instead.
+    """
     from homecloud_cli.prompts import is_interactive, select_login_mode
     from homecloud_core.mfa import PreferBrowserLogin
 
@@ -295,6 +303,7 @@ def login(
         not use_browser
         and mfa_code is None
         and is_interactive()
+        and account is None
         and username is None
         and password is None
     ):
@@ -306,6 +315,7 @@ def login(
         else:
             try:
                 client.login(
+                    account or typer.prompt("Account (number or alias)"),
                     username or typer.prompt("Username"),
                     password or typer.prompt("Password", hide_input=True),
                     mfa_code=mfa_code,
@@ -815,7 +825,7 @@ def so_ls_buckets(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "table",
 ) -> None:
-    """List storage buckets (console API — requires login)."""
+    """List storage buckets (Access Key — no login required; falls back to console JWT)."""
     try:
         items = _client(profile).so.list_buckets()
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:

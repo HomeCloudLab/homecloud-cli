@@ -40,6 +40,6 @@ homecloud so cp ./file.txt s3://media/path/file.txt
 homecloud so rm s3://media/path/file.txt
 ```
 
-`homecloud so ls-buckets` requires `homecloud login` (console JWT).
+`homecloud so ls-buckets` uses Access Key (SigV1) like `so ls` — no console login required when keys are configured.
 
 Expected output from script: `SMOKE_OK`
