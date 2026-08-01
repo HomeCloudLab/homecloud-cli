@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -17,6 +19,7 @@ from homecloud_cli import __version__
 from homecloud_core.errors import HomeCloudError
 
 DEFAULT_RELEASES_BASE = "https://homecloud-cli.so.holab.abrdns.com/releases"
+_VERSION_RE = re.compile(r"homecloud\s+(\d+\.\d+\.\d+)")
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,8 @@ class InstallResult:
     version: str
     path: Path
     replaced_running: bool
+    changed: bool = True
+    path_updated: bool = False
 
 
 def releases_base() -> str:
@@ -146,8 +151,41 @@ def install_target_path() -> Path:
     return default_install_dir() / name
 
 
+def read_binary_version(path: Path) -> str | None:
+    """Return the version reported by an installed ``homecloud`` binary, if any."""
+    if not path.is_file():
+        return None
+    try:
+        completed = subprocess.run(
+            [str(path), "version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError:
+        return None
+    output = (completed.stdout or "") + (completed.stderr or "")
+    match = _VERSION_RE.search(output)
+    if not match:
+        return None
+    return normalize_version_string(match.group(1))
+
+
+def path_points_at_standalone(target: Path | None = None) -> bool:
+    """True when ``homecloud`` on PATH resolves to the standalone install target."""
+    target = (target or install_target_path()).resolve()
+    found = shutil.which("homecloud")
+    if not found:
+        return False
+    try:
+        return Path(found).resolve() == target
+    except OSError:
+        return False
+
+
 def _ensure_dir_on_user_path(directory: Path) -> bool:
-    """Append ``directory`` to the user PATH on Windows if missing. Returns True if changed."""
+    """Put ``directory`` first on the user PATH (Windows). Returns True if changed."""
     if os.name != "nt":
         return False
     try:
@@ -155,7 +193,7 @@ def _ensure_dir_on_user_path(directory: Path) -> bool:
     except ImportError:
         return False
 
-    dir_str = str(directory)
+    dir_str = str(directory.resolve())
     with winreg.OpenKey(
         winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_SET_VALUE
     ) as key:
@@ -164,15 +202,17 @@ def _ensure_dir_on_user_path(directory: Path) -> bool:
         except FileNotFoundError:
             current = ""
         parts = [p for p in str(current).split(";") if p]
-        if any(os.path.normcase(p) == os.path.normcase(dir_str) for p in parts):
+        norm = os.path.normcase(dir_str)
+        already_first = bool(parts) and os.path.normcase(parts[0]) == norm
+        without = [p for p in parts if os.path.normcase(p) != norm]
+        if already_first and len(without) == len(parts) - 1:
             return False
-        # Prefer the standalone dir early so it wins over pip Scripts.
-        new_path = ";".join([dir_str, *parts]) if parts else dir_str
+        # Prefer the standalone dir first so it wins over pip Scripts.
+        new_path = ";".join([dir_str, *without])
         winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
-
-    # Refresh this process PATH for any follow-up commands.
-    os.environ["Path"] = dir_str + os.pathsep + os.environ.get("Path", "")
-    return True
+        return True
+    # Do not mutate this process PATH — the parent shell still has the old one.
+    # Callers should tell the user to open a new terminal when needed.
 
 
 def _sha256_file(path: Path) -> str:
@@ -194,17 +234,32 @@ def _download_binary(url: str, dest: Path) -> None:
         raise HomeCloudError(f"Download failed ({url}): {exc}") from exc
 
 
+def _parse_sha256_line(raw: str) -> str | None:
+    """Extract a hex digest from a ``sha256sum``-style line (tolerates BOM/CRLF)."""
+    text = raw.lstrip("\ufeff").strip()
+    if not text:
+        return None
+    token = text.split()[0].strip().lower()
+    if len(token) == 64 and all(c in "0123456789abcdef" for c in token):
+        return token
+    return None
+
+
 def _verify_checksum(binary: Path, checksum_url: str) -> None:
     try:
         raw = fetch_text(checksum_url)
     except HomeCloudError:
         return  # checksum optional if missing
-    expected = raw.split()[0].strip().lower() if raw else ""
+    expected = _parse_sha256_line(raw)
     if not expected:
         return
     actual = _sha256_file(binary)
     if actual != expected:
-        raise HomeCloudError("Checksum mismatch — aborting update")
+        raise HomeCloudError(
+            f"Checksum mismatch — aborting update\n"
+            f"  expected: {expected}\n"
+            f"  actual:   {actual}"
+        )
 
 
 def _replace_binary(downloaded: Path, target: Path) -> None:
@@ -237,7 +292,7 @@ def _replace_binary(downloaded: Path, target: Path) -> None:
         os.replace(downloaded, target)
 
 
-def install_version(version: str | None = None) -> InstallResult:
+def install_version(version: str | None = None, *, force: bool = False) -> InstallResult:
     """Download and install ``latest`` or a pinned ``vX.Y.Z``."""
     channel = normalize_channel(version)
     _platform, artifact = platform_artifact()
@@ -249,15 +304,32 @@ def install_version(version: str | None = None) -> InstallResult:
     else:
         resolved = normalize_version_string(channel)
 
-    current = normalize_version_string(__version__)
-    if (
-        channel == "latest"
-        and replaced_running
-        and parse_semver(resolved) == parse_semver(current)
-    ):
-        return InstallResult(version=current, path=target, replaced_running=True)
+    # Always fetch immutable release assets (not ``latest/``) so VERSION + binary +
+    # checksum cannot race while a new release is uploading to latest/.
+    asset_channel = f"v{resolved}"
 
-    url = f"{releases_base()}/{channel}/{artifact}"
+    installed = (
+        normalize_version_string(__version__)
+        if replaced_running
+        else read_binary_version(target)
+    )
+    if (
+        not force
+        and installed is not None
+        and parse_semver(installed) == parse_semver(resolved)
+    ):
+        path_updated = False
+        if not replaced_running:
+            path_updated = _ensure_dir_on_user_path(target.parent)
+        return InstallResult(
+            version=resolved,
+            path=target,
+            replaced_running=replaced_running,
+            changed=False,
+            path_updated=path_updated,
+        )
+
+    url = f"{releases_base()}/{asset_channel}/{artifact}"
     checksum_url = f"{url}.sha256"
 
     with tempfile.TemporaryDirectory(prefix="homecloud-update-") as tmp:
@@ -266,7 +338,14 @@ def install_version(version: str | None = None) -> InstallResult:
         _verify_checksum(tmp_path, checksum_url)
         _replace_binary(tmp_path, target)
 
+    path_updated = False
     if not replaced_running:
-        _ensure_dir_on_user_path(target.parent)
+        path_updated = _ensure_dir_on_user_path(target.parent)
 
-    return InstallResult(version=resolved, path=target, replaced_running=replaced_running)
+    return InstallResult(
+        version=resolved,
+        path=target,
+        replaced_running=replaced_running,
+        changed=True,
+        path_updated=path_updated,
+    )

@@ -267,7 +267,7 @@ def update_cmd(
         typer.Option(
             "--version",
             "-v",
-            help="Install a specific release (e.g. 0.2.31 or v0.2.31). Default: latest",
+            help="Install a specific release (e.g. 0.2.32 or v0.2.32). Default: latest",
         ),
     ] = None,
 ) -> None:
@@ -286,28 +286,15 @@ def update_cmd(
             info = check_for_update()
         except HomeCloudError as exc:
             _handle_error(exc)
-        typer.echo(f"Current: {info.current} ({info.runtime})")
-        typer.echo(f"Latest:  {info.latest}")
         if info.update_available:
-            typer.echo("Update available. Run: homecloud update")
+            typer.echo(f"Update available: {info.current} → {info.latest}")
             raise typer.Exit(code=2)
-        typer.echo("Already up to date.")
+        typer.echo(f"Already up to date ({info.current}).")
         return
 
     try:
         if version is None:
             typer.echo("Checking for updates…")
-            info = check_for_update()
-            if info.runtime == "standalone" and not info.update_available:
-                typer.echo(f"Already up to date ({info.current}).")
-                return
-            if info.runtime == "standalone":
-                typer.echo(f"Updating {info.current} → {info.latest}…")
-            else:
-                typer.echo(
-                    f"Installing standalone binary {info.latest} "
-                    f"(current shell is source {info.current})…"
-                )
             result = install_version("latest")
         else:
             typer.echo(f"Installing {version}…")
@@ -315,13 +302,10 @@ def update_cmd(
     except HomeCloudError as exc:
         _handle_error(exc)
 
-    typer.echo(f"Installed homecloud {result.version}")
-    typer.echo(f"  {result.path}")
-    if not result.replaced_running:
-        typer.echo("Open a new terminal so PATH picks up the standalone binary.")
-        typer.echo("Tip: if `homecloud version` still says source, the pip entry is earlier on PATH.")
+    if not result.changed:
+        typer.echo(f"Already up to date ({result.version}).")
     else:
-        typer.echo("Run: homecloud version")
+        typer.echo(f"Installed homecloud {result.version}")
 
 
 @app.callback()

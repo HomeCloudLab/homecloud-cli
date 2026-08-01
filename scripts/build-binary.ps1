@@ -44,6 +44,8 @@ pyinstaller --noconfirm --clean --distpath $Dist --workpath (Join-Path $Dist "bu
 Move-Item -Force (Join-Path $Dist "homecloud.exe") (Join-Path $Dist $Artifact)
 
 $hash = Get-FileHash (Join-Path $Dist $Artifact) -Algorithm SHA256
-"$($hash.Hash.ToLower())  $Artifact" | Set-Content (Join-Path $Dist "$Artifact.sha256")
+# ASCII + LF only (Set-Content can write UTF-16/BOM/CRLF and break checksum clients)
+$shaPath = Join-Path $Dist "$Artifact.sha256"
+[System.IO.File]::WriteAllText($shaPath, "$($hash.Hash.ToLower())  $Artifact`n")
 
 Write-Host "Built: $(Join-Path $Dist $Artifact)"

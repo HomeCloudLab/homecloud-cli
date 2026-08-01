@@ -78,25 +78,44 @@ def test_update_from_source_installs_binary(
     monkeypatch.setattr(update_mod, "is_standalone", lambda: False)
     monkeypatch.setattr(
         update_mod,
-        "check_for_update",
-        lambda: update_mod.VersionCheck(
-            current="0.2.29",
-            latest="9.9.9",
-            update_available=True,
-            runtime="source",
-        ),
-    )
-    monkeypatch.setattr(
-        update_mod,
         "install_version",
         lambda *_a, **_k: update_mod.InstallResult(
-            version="9.9.9", path=target, replaced_running=False
+            version="9.9.9",
+            path=target,
+            replaced_running=False,
+            changed=True,
+            path_updated=True,
         ),
     )
     result = runner.invoke(app, ["update"])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "Installed homecloud 9.9.9" in result.stdout
-    assert "new terminal" in result.stdout.lower()
+    assert "new terminal" not in result.stdout.lower()
+
+
+def test_update_skips_when_binary_already_current(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
+) -> None:
+    from homecloud_cli import update as update_mod
+
+    target = tmp_path / "homecloud.exe"
+    monkeypatch.setattr(
+        update_mod,
+        "install_version",
+        lambda *_a, **_k: update_mod.InstallResult(
+            version="0.2.31",
+            path=target,
+            replaced_running=False,
+            changed=False,
+            path_updated=False,
+        ),
+    )
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert result.stdout.strip().splitlines() == [
+        "Checking for updates…",
+        "Already up to date (0.2.31).",
+    ]
 
 
 def test_install_version_replaces_binary(
@@ -135,6 +154,74 @@ def test_install_target_path_source_uses_default_dir(
     path = update_mod.install_target_path()
     assert path.parent == tmp_path
     assert path.name in {"homecloud", "homecloud.exe"}
+
+
+def test_install_version_downloads_pinned_channel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from homecloud_cli import update as update_mod
+
+    target = tmp_path / "homecloud.exe"
+    seen: dict[str, str] = {}
+
+    monkeypatch.setattr(update_mod, "is_standalone", lambda: False)
+    monkeypatch.setattr(update_mod, "install_target_path", lambda: target)
+    monkeypatch.setattr(update_mod, "platform_artifact", lambda: ("windows-amd64", "bin.exe"))
+    monkeypatch.setattr(update_mod, "fetch_latest_version", lambda: "9.9.9")
+    monkeypatch.setattr(update_mod, "_ensure_dir_on_user_path", lambda _p: False)
+
+    def fake_download(url: str, dest: Path) -> None:
+        seen["url"] = url
+        dest.write_bytes(b"new-binary")
+
+    def fake_verify(binary: Path, checksum_url: str) -> None:
+        seen["checksum_url"] = checksum_url
+
+    monkeypatch.setattr(update_mod, "_download_binary", fake_download)
+    monkeypatch.setattr(update_mod, "_verify_checksum", fake_verify)
+    monkeypatch.setattr(update_mod, "read_binary_version", lambda _p: "0.1.0")
+
+    result = update_mod.install_version("latest")
+    assert result.version == "9.9.9"
+    assert result.changed is True
+    assert "/releases/v9.9.9/" in seen["url"]
+    assert "/releases/latest/" not in seen["url"]
+    assert seen["checksum_url"].endswith(".sha256")
+
+
+def test_install_version_skips_download_when_target_current(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from homecloud_cli import update as update_mod
+
+    target = tmp_path / "homecloud.exe"
+    target.write_bytes(b"binary")
+    called = {"download": False}
+
+    monkeypatch.setattr(update_mod, "is_standalone", lambda: False)
+    monkeypatch.setattr(update_mod, "install_target_path", lambda: target)
+    monkeypatch.setattr(update_mod, "fetch_latest_version", lambda: "0.2.31")
+    monkeypatch.setattr(update_mod, "read_binary_version", lambda _p: "0.2.31")
+    monkeypatch.setattr(update_mod, "_ensure_dir_on_user_path", lambda _p: False)
+    monkeypatch.setattr(
+        update_mod,
+        "_download_binary",
+        lambda *_a, **_k: called.__setitem__("download", True),
+    )
+
+    result = update_mod.install_version("latest")
+    assert result.changed is False
+    assert result.version == "0.2.31"
+    assert called["download"] is False
+
+
+def test_parse_sha256_line() -> None:
+    from homecloud_cli.update import _parse_sha256_line
+
+    digest = "6b69b46a888723540e4bcd24a290ff537e8accb730f35e322d23cab31d8541e0"
+    assert _parse_sha256_line(f"{digest}  homecloud-windows-amd64.exe\r\n") == digest
+    assert _parse_sha256_line(f"\ufeff{digest}  file") == digest
+    assert _parse_sha256_line("not-a-hash") is None
 
 
 def test_fetch_latest_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
