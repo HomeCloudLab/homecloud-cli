@@ -267,12 +267,16 @@ def update_cmd(
         typer.Option(
             "--version",
             "-v",
-            help="Install a specific release (e.g. 0.2.30 or v0.2.30). Default: latest",
+            help="Install a specific release (e.g. 0.2.31 or v0.2.31). Default: latest",
         ),
     ] = None,
 ) -> None:
-    """Check for or install a newer HomeCloud CLI release (standalone binary)."""
-    from homecloud_cli.update import check_for_update, install_version, is_standalone
+    """Check for or install a HomeCloud CLI standalone binary release.
+
+    From a pip/source install, downloads the binary into the default install
+    directory (same as the installer). From a standalone binary, replaces itself.
+    """
+    from homecloud_cli.update import check_for_update, install_version
 
     if check and version:
         raise typer.BadParameter("Use either --check or --version, not both")
@@ -285,51 +289,39 @@ def update_cmd(
         typer.echo(f"Current: {info.current} ({info.runtime})")
         typer.echo(f"Latest:  {info.latest}")
         if info.update_available:
-            typer.echo("Update available.")
-            if info.runtime != "standalone":
-                typer.echo(
-                    "This is a source install — use the installer for a standalone binary, "
-                    "or upgrade the package in this environment."
-                )
-            else:
-                typer.echo("Run: homecloud update")
+            typer.echo("Update available. Run: homecloud update")
             raise typer.Exit(code=2)
         typer.echo("Already up to date.")
-        return
-
-    if not is_standalone() and version is None:
-        # Allow --check above; install path requires a replaceable binary.
-        try:
-            info = check_for_update()
-        except HomeCloudError as exc:
-            _handle_error(exc)
-        if info.update_available:
-            _handle_error(
-                HomeCloudError(
-                    f"Update available: {info.current} → {info.latest}\n"
-                    "This CLI is a source install (pip), not a standalone binary.\n"
-                    "Re-run the installer, or upgrade the package in this environment."
-                )
-            )
-        typer.echo(f"Already up to date ({info.current}, source).")
         return
 
     try:
         if version is None:
             typer.echo("Checking for updates…")
             info = check_for_update()
-            if not info.update_available:
+            if info.runtime == "standalone" and not info.update_available:
                 typer.echo(f"Already up to date ({info.current}).")
                 return
-            typer.echo(f"Updating {info.current} → {info.latest}…")
-            installed = install_version("latest")
+            if info.runtime == "standalone":
+                typer.echo(f"Updating {info.current} → {info.latest}…")
+            else:
+                typer.echo(
+                    f"Installing standalone binary {info.latest} "
+                    f"(current shell is source {info.current})…"
+                )
+            result = install_version("latest")
         else:
             typer.echo(f"Installing {version}…")
-            installed = install_version(version)
+            result = install_version(version)
     except HomeCloudError as exc:
         _handle_error(exc)
-    typer.echo(f"Installed homecloud {installed}")
-    typer.echo("Run: homecloud version")
+
+    typer.echo(f"Installed homecloud {result.version}")
+    typer.echo(f"  {result.path}")
+    if not result.replaced_running:
+        typer.echo("Open a new terminal so PATH picks up the standalone binary.")
+        typer.echo("Tip: if `homecloud version` still says source, the pip entry is earlier on PATH.")
+    else:
+        typer.echo("Run: homecloud version")
 
 
 @app.callback()

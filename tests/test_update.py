@@ -68,10 +68,12 @@ def test_update_check_cli(monkeypatch: pytest.MonkeyPatch, runner: CliRunner) ->
     assert "Traceback" not in result.stdout
 
 
-def test_update_source_install_message(
-    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+def test_update_from_source_installs_binary(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:
     from homecloud_cli import update as update_mod
+
+    target = tmp_path / "homecloud.exe"
 
     monkeypatch.setattr(update_mod, "is_standalone", lambda: False)
     monkeypatch.setattr(
@@ -84,10 +86,17 @@ def test_update_source_install_message(
             runtime="source",
         ),
     )
+    monkeypatch.setattr(
+        update_mod,
+        "install_version",
+        lambda *_a, **_k: update_mod.InstallResult(
+            version="9.9.9", path=target, replaced_running=False
+        ),
+    )
     result = runner.invoke(app, ["update"])
-    assert result.exit_code == 1
-    assert "source install" in (result.stderr + result.stdout).lower()
-    assert "Traceback" not in result.stdout
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "Installed homecloud 9.9.9" in result.stdout
+    assert "new terminal" in result.stdout.lower()
 
 
 def test_install_version_replaces_binary(
@@ -111,8 +120,21 @@ def test_install_version_replaces_binary(
     monkeypatch.setattr(update_mod, "_verify_checksum", lambda *_a, **_k: None)
 
     installed = update_mod.install_version("latest")
-    assert installed == "9.9.9"
+    assert installed.version == "9.9.9"
+    assert installed.path == target
     assert target.read_bytes() == b"new-binary"
+
+
+def test_install_target_path_source_uses_default_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from homecloud_cli import update as update_mod
+
+    monkeypatch.setattr(update_mod, "is_standalone", lambda: False)
+    monkeypatch.setattr(update_mod, "default_install_dir", lambda: tmp_path)
+    path = update_mod.install_target_path()
+    assert path.parent == tmp_path
+    assert path.name in {"homecloud", "homecloud.exe"}
 
 
 def test_fetch_latest_http_error(monkeypatch: pytest.MonkeyPatch) -> None:

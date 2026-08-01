@@ -1,4 +1,4 @@
-"""Self-update helpers for the standalone HomeCloud CLI binary."""
+"""Self-update helpers for the HomeCloud CLI binary."""
 
 from __future__ import annotations
 
@@ -25,6 +25,13 @@ class VersionCheck:
     latest: str
     update_available: bool
     runtime: str  # "standalone" | "source"
+
+
+@dataclass(frozen=True)
+class InstallResult:
+    version: str
+    path: Path
+    replaced_running: bool
 
 
 def releases_base() -> str:
@@ -116,14 +123,56 @@ def check_for_update() -> VersionCheck:
     )
 
 
+def default_install_dir() -> Path:
+    """Same defaults as install.ps1 / install.sh (overridable via HOMECLOUD_INSTALL_DIR)."""
+    override = os.environ.get("HOMECLOUD_INSTALL_DIR")
+    if override:
+        return Path(override).expanduser()
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(local) / "Programs" / "homecloud"
+    return Path.home() / ".local" / "bin"
+
+
 def install_target_path() -> Path:
-    """Path of the binary that ``homecloud update`` should replace."""
+    """Path of the binary that ``homecloud update`` writes.
+
+    Standalone replaces the running executable. Source / pip installs the
+    published binary into the default install location (same as the installer).
+    """
     if is_standalone():
         return Path(sys.executable).resolve()
-    raise HomeCloudError(
-        "This CLI is a source install (pip), not a standalone binary.\n"
-        "Install or upgrade the binary with the installer, or upgrade the package in this environment."
-    )
+    name = "homecloud.exe" if os.name == "nt" else "homecloud"
+    return default_install_dir() / name
+
+
+def _ensure_dir_on_user_path(directory: Path) -> bool:
+    """Append ``directory`` to the user PATH on Windows if missing. Returns True if changed."""
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+    except ImportError:
+        return False
+
+    dir_str = str(directory)
+    with winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_SET_VALUE
+    ) as key:
+        try:
+            current, _ = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            current = ""
+        parts = [p for p in str(current).split(";") if p]
+        if any(os.path.normcase(p) == os.path.normcase(dir_str) for p in parts):
+            return False
+        # Prefer the standalone dir early so it wins over pip Scripts.
+        new_path = ";".join([dir_str, *parts]) if parts else dir_str
+        winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+
+    # Refresh this process PATH for any follow-up commands.
+    os.environ["Path"] = dir_str + os.pathsep + os.environ.get("Path", "")
+    return True
 
 
 def _sha256_file(path: Path) -> str:
@@ -169,10 +218,18 @@ def _replace_binary(downloaded: Path, target: Path) -> None:
             except OSError:
                 pass
         if target.exists():
-            target.replace(old)
+            try:
+                target.replace(old)
+            except OSError:
+                # Not locked (e.g. installing beside a pip entrypoint) — overwrite.
+                try:
+                    target.unlink()
+                except OSError as exc:
+                    raise HomeCloudError(f"Cannot replace {target}: {exc}") from exc
         shutil.move(str(downloaded), str(target))
         try:
-            old.unlink()
+            if old.exists():
+                old.unlink()
         except OSError:
             pass
     else:
@@ -180,11 +237,12 @@ def _replace_binary(downloaded: Path, target: Path) -> None:
         os.replace(downloaded, target)
 
 
-def install_version(version: str | None = None) -> str:
-    """Download and install ``latest`` or a pinned ``vX.Y.Z``. Returns installed version string."""
+def install_version(version: str | None = None) -> InstallResult:
+    """Download and install ``latest`` or a pinned ``vX.Y.Z``."""
     channel = normalize_channel(version)
     _platform, artifact = platform_artifact()
     target = install_target_path()
+    replaced_running = is_standalone()
 
     if channel == "latest":
         resolved = fetch_latest_version()
@@ -192,8 +250,12 @@ def install_version(version: str | None = None) -> str:
         resolved = normalize_version_string(channel)
 
     current = normalize_version_string(__version__)
-    if channel == "latest" and parse_semver(resolved) == parse_semver(current):
-        return current
+    if (
+        channel == "latest"
+        and replaced_running
+        and parse_semver(resolved) == parse_semver(current)
+    ):
+        return InstallResult(version=current, path=target, replaced_running=True)
 
     url = f"{releases_base()}/{channel}/{artifact}"
     checksum_url = f"{url}.sha256"
@@ -204,4 +266,7 @@ def install_version(version: str | None = None) -> str:
         _verify_checksum(tmp_path, checksum_url)
         _replace_binary(tmp_path, target)
 
-    return resolved
+    if not replaced_running:
+        _ensure_dir_on_user_path(target.parent)
+
+    return InstallResult(version=resolved, path=target, replaced_running=replaced_running)
