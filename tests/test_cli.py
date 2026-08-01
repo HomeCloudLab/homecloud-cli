@@ -5,6 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from homecloud_cli.cli import app
@@ -23,11 +24,11 @@ def runner() -> CliRunner:
 def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.26" in result.stdout
+    assert "0.2.30" in result.stdout
 
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "homecloud 0.2.26" in result.stdout
+    assert "homecloud 0.2.30" in result.stdout
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
@@ -1209,3 +1210,65 @@ def test_inline_access_key_flags_without_credentials_file(
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
+
+
+def test_main_managed_error_has_no_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from homecloud_cli import cli as cli_mod
+    from homecloud_core.errors import HomeCloudError
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise HomeCloudError("not configured")
+
+    monkeypatch.setattr(cli_mod, "app", boom)
+    with pytest.raises(SystemExit) as exited:
+        cli_mod.main()
+    assert exited.value.code == 1
+    captured = capsys.readouterr()
+    assert "not configured" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
+def test_main_unexpected_error_has_no_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from homecloud_cli import cli as cli_mod
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.delenv("HOMECLOUD_DEBUG", raising=False)
+    monkeypatch.setattr(cli_mod, "app", boom)
+    with pytest.raises(SystemExit) as exited:
+        cli_mod.main()
+    assert exited.value.code == 1
+    captured = capsys.readouterr()
+    assert "Unexpected error: boom" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_handle_error_cancelled_is_quiet(capsys: pytest.CaptureFixture[str]) -> None:
+    from homecloud_cli.cli import _handle_error
+    from homecloud_core.errors import HomeCloudError
+
+    with pytest.raises(typer.Exit) as exited:
+        _handle_error(HomeCloudError("Cancelled"))
+    assert exited.value.exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "Traceback" not in captured.out
+
+
+def test_handle_error_prints_message_only(capsys: pytest.CaptureFixture[str]) -> None:
+    from homecloud_cli.cli import _handle_error
+    from homecloud_core.errors import HomeCloudError
+
+    with pytest.raises(typer.Exit) as exited:
+        _handle_error(HomeCloudError("Bucket not found"))
+    assert exited.value.exit_code == 1
+    captured = capsys.readouterr()
+    assert "Bucket not found" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out

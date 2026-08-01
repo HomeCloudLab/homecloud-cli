@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
 
+import click
 import typer
 from homecloud_core.defaults import DEFAULT_PROFILE
 from homecloud_core.errors import HomeCloudError
@@ -20,7 +22,12 @@ from homecloud_cli.output import emit
 from homecloud_cli.so_progress import SoTransferProgress
 from homecloud_cli.transfer_progress import TransferProgress
 
-app = typer.Typer(no_args_is_help=True, help="HomeCloud command-line interface")
+# Managed errors are printed by ``main()`` / ``_handle_error`` — never Rich tracebacks.
+app = typer.Typer(
+    no_args_is_help=True,
+    help="HomeCloud command-line interface",
+    pretty_exceptions_enable=False,
+)
 configure_app = typer.Typer(help="Set up Access Keys and profiles")
 config_app = typer.Typer(help="Show current configuration")
 accounts_app = typer.Typer(help="Account commands")
@@ -147,9 +154,69 @@ def _format_error(exc: Exception) -> str:
     return str(exc)
 
 
+def _is_cancelled(exc: BaseException) -> bool:
+    return isinstance(exc, HomeCloudError) and str(exc) == "Cancelled"
+
+
+def _print_error(message: str) -> None:
+    typer.secho(message, fg=typer.colors.RED, err=True)
+
+
 def _handle_error(exc: Exception) -> None:
-    typer.secho(_format_error(exc), fg=typer.colors.RED, err=True)
-    raise typer.Exit(code=1) from exc
+    """Print a managed error and exit. Never re-raises the original exception."""
+    if not _is_cancelled(exc):
+        _print_error(_format_error(exc))
+    raise typer.Exit(code=1)
+
+
+# Expected failures — show the message as-is (no "Unexpected error" prefix).
+_MANAGED_EXCEPTIONS = (
+    HomeCloudError,
+    FileNotFoundError,
+    NotADirectoryError,
+    PermissionError,
+    TimeoutError,
+    ValueError,
+    OSError,
+    json.JSONDecodeError,
+)
+
+
+def _exit_with_error(exc: BaseException) -> None:
+    """Top-level handler for *all* commands: short message, never a traceback.
+
+    Set ``HOMECLOUD_DEBUG=1`` to re-raise unexpected errors with a full traceback.
+    """
+    if isinstance(exc, (typer.Exit, click.exceptions.Exit)):
+        code = getattr(exc, "exit_code", None)
+        raise SystemExit(0 if code is None else code)
+    if isinstance(exc, SystemExit):
+        raise exc
+    if isinstance(exc, click.ClickException):
+        # BadParameter, UsageError, etc. — Click's own one-line messages
+        exc.show()
+        raise SystemExit(exc.exit_code)
+    if isinstance(exc, (click.Abort, KeyboardInterrupt)):
+        _print_error("Aborted.")
+        raise SystemExit(130 if isinstance(exc, KeyboardInterrupt) else 1)
+    if _is_cancelled(exc):
+        # questionary already printed "Cancelled by user"
+        raise SystemExit(1)
+    if os.environ.get("HOMECLOUD_DEBUG") and not isinstance(exc, _MANAGED_EXCEPTIONS):
+        raise exc
+    if isinstance(exc, HomeCloudError):
+        _print_error(_format_error(exc))
+    elif isinstance(exc, _MANAGED_EXCEPTIONS):
+        text = str(exc).strip()
+        if text:
+            _print_error(text)
+    elif isinstance(exc, Exception):
+        text = str(exc).strip() or type(exc).__name__
+        _print_error(f"Unexpected error: {text}")
+        _print_error("Run with HOMECLOUD_DEBUG=1 for a full traceback.")
+    else:
+        _print_error(f"Unexpected error: {exc}")
+    raise SystemExit(1)
 
 
 def version_callback(value: bool) -> None:
@@ -167,9 +234,102 @@ def _version_line() -> str:
 
 
 @app.command("version")
-def version_cmd() -> None:
+def version_cmd(
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Check whether a newer release is available"),
+    ] = False,
+) -> None:
     """Show CLI version and build metadata."""
     typer.echo(_version_line())
+    if check:
+        from homecloud_cli.update import check_for_update
+
+        try:
+            info = check_for_update()
+        except HomeCloudError as exc:
+            _handle_error(exc)
+        if info.update_available:
+            typer.echo(f"Update available: {info.current} → {info.latest}")
+            typer.echo("Run: homecloud update")
+            raise typer.Exit(code=2)
+        typer.echo(f"Up to date (latest {info.latest})")
+
+
+@app.command("update")
+def update_cmd(
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Only check for a newer release; do not install"),
+    ] = False,
+    version: Annotated[
+        Optional[str],
+        typer.Option(
+            "--version",
+            "-v",
+            help="Install a specific release (e.g. 0.2.30 or v0.2.30). Default: latest",
+        ),
+    ] = None,
+) -> None:
+    """Check for or install a newer HomeCloud CLI release (standalone binary)."""
+    from homecloud_cli.update import check_for_update, install_version, is_standalone
+
+    if check and version:
+        raise typer.BadParameter("Use either --check or --version, not both")
+
+    if check:
+        try:
+            info = check_for_update()
+        except HomeCloudError as exc:
+            _handle_error(exc)
+        typer.echo(f"Current: {info.current} ({info.runtime})")
+        typer.echo(f"Latest:  {info.latest}")
+        if info.update_available:
+            typer.echo("Update available.")
+            if info.runtime != "standalone":
+                typer.echo(
+                    "This is a source install — use the installer for a standalone binary, "
+                    "or upgrade the package in this environment."
+                )
+            else:
+                typer.echo("Run: homecloud update")
+            raise typer.Exit(code=2)
+        typer.echo("Already up to date.")
+        return
+
+    if not is_standalone() and version is None:
+        # Allow --check above; install path requires a replaceable binary.
+        try:
+            info = check_for_update()
+        except HomeCloudError as exc:
+            _handle_error(exc)
+        if info.update_available:
+            _handle_error(
+                HomeCloudError(
+                    f"Update available: {info.current} → {info.latest}\n"
+                    "This CLI is a source install (pip), not a standalone binary.\n"
+                    "Re-run the installer, or upgrade the package in this environment."
+                )
+            )
+        typer.echo(f"Already up to date ({info.current}, source).")
+        return
+
+    try:
+        if version is None:
+            typer.echo("Checking for updates…")
+            info = check_for_update()
+            if not info.update_available:
+                typer.echo(f"Already up to date ({info.current}).")
+                return
+            typer.echo(f"Updating {info.current} → {info.latest}…")
+            installed = install_version("latest")
+        else:
+            typer.echo(f"Installing {version}…")
+            installed = install_version(version)
+    except HomeCloudError as exc:
+        _handle_error(exc)
+    typer.echo(f"Installed homecloud {installed}")
+    typer.echo("Run: homecloud version")
 
 
 @app.callback()
@@ -295,21 +455,21 @@ def login(
     from homecloud_cli.prompts import is_interactive, select_login_mode
     from homecloud_core.mfa import PreferBrowserLogin
 
-    client = _client(profile, mfa_code=mfa_code)
-    use_browser = browser
-
-    # Interactive: arrow-key choose terminal vs browser (unless flags already decided).
-    if (
-        not use_browser
-        and mfa_code is None
-        and is_interactive()
-        and account is None
-        and username is None
-        and password is None
-    ):
-        use_browser = select_login_mode(default="terminal") == "browser"
-
     try:
+        client = _client(profile, mfa_code=mfa_code)
+        use_browser = browser
+
+        # Interactive: arrow-key choose terminal vs browser (unless flags already decided).
+        if (
+            not use_browser
+            and mfa_code is None
+            and is_interactive()
+            and account is None
+            and username is None
+            and password is None
+        ):
+            use_browser = select_login_mode(default="terminal") == "browser"
+
         if use_browser:
             _run_browser_login(client)
         else:
@@ -1161,7 +1321,7 @@ def fn_watch(
                     detail = client.functions.get_invocation(name, iid)
                 except HomeCloudError as exc:
                     console.print(f"[red]Failed to load detail: {exc}[/red]")
-                    raise SystemExit(1) from exc
+                    raise SystemExit(1)
                 if detail.get("error_message"):
                     console.print(f"[red]{detail['error_message']}[/red]")
                 logs = detail.get("logs") or ""
@@ -1244,4 +1404,12 @@ def mail_attachment(
 
 
 def main() -> None:
-    app()
+    """CLI entrypoint — catch every failure so users never see a Python traceback."""
+    try:
+        # standalone_mode=False: Click/Typer re-raise instead of printing their own
+        # stacks; we format everything in ``_exit_with_error``.
+        app(standalone_mode=False)
+    except GeneratorExit:
+        raise
+    except BaseException as exc:
+        _exit_with_error(exc)
