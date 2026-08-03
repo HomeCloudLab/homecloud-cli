@@ -8,6 +8,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from homecloud_cli import __version__
 from homecloud_cli.cli import app
 
 
@@ -24,11 +25,11 @@ def runner() -> CliRunner:
 def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.32" in result.stdout
+    assert __version__ in result.stdout
 
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "homecloud 0.2.32" in result.stdout
+    assert f"homecloud {__version__}" in result.stdout
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
