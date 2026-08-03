@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "homecloud-cli"
 version = "0.2.35"
 description = "HomeCloud command-line interface"
