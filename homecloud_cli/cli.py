@@ -38,6 +38,7 @@ mq_app = typer.Typer(help="Message queue commands")
 so_app = typer.Typer(help="Object storage commands")
 fn_app = typer.Typer(help="Functions commands")
 mail_app = typer.Typer(help="Mail commands")
+ir_app = typer.Typer(help="Image Registry (IR) commands")
 
 app.add_typer(configure_app, name="configure")
 app.add_typer(config_app, name="config")
@@ -48,6 +49,7 @@ app.add_typer(mq_app, name="mq")
 app.add_typer(so_app, name="so")
 app.add_typer(fn_app, name="fn")
 app.add_typer(mail_app, name="mail")
+app.add_typer(ir_app, name="ir")
 
 
 def _profile_option(profile: Optional[str]) -> str | None:
@@ -1305,6 +1307,56 @@ def fn_watch(
                 return
     except HomeCloudError as exc:
         _handle_error(exc)
+
+
+@ir_app.command("login")
+def ir_login(
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+) -> None:
+    """Print docker login instructions for Image Registry (IR)."""
+    client = _client(profile)
+    host = "ir.holab.abrdns.com"
+    try:
+        data = client.ir.list()
+        host = data.get("registry_host") or host
+    except HomeCloudError:
+        pass
+    typer.echo(f"docker login {host}")
+    typer.echo("Username: <Access Key id>")
+    typer.echo("Password: <Access Key secret>")
+    typer.echo(f"Push example: docker push {host}/{{account_short_id}}/{{repo}}:tag")
+
+
+@ir_app.command("repo")
+def ir_repo(
+    action: Annotated[str, typer.Argument(help="list | create")],
+    name: Annotated[Optional[str], typer.Argument()] = None,
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="json|table|yaml")] = "table",
+) -> None:
+    """Manage IR repositories (console JWT)."""
+    client = _client(profile)
+    if action == "list":
+        data = client.ir.list()
+        emit(data.get("items", data), output_format=_output_option(output), columns=["name", "status", "zot_namespace"])
+        return
+    if action == "create":
+        if not name:
+            raise typer.BadParameter("name required for create")
+        data = client.ir.create(name)
+        emit(data, output_format=_output_option(output))
+        return
+    raise typer.BadParameter("action must be list or create")
+
+
+@ir_app.command("usage")
+def ir_usage(
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="json|table|yaml")] = "table",
+) -> None:
+    """Show IR quota usage."""
+    client = _client(profile)
+    emit(client.ir.usage(), output_format=_output_option(output))
 
 
 @mail_app.command("mailboxes")
