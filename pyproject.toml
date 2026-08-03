@@ -1,6 +1,6 @@
 [project]
 name = "homecloud-cli"
-version = "0.2.33"
+version = "0.2.34"
 description = "HomeCloud command-line interface"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -11,6 +11,7 @@ dependencies = [
     "questionary>=2.0.0",
     "rich>=13.9.0",
     "typer>=0.15.0",
+    "click>=8.1.0",
 ]
 
 [project.optional-dependencies]
