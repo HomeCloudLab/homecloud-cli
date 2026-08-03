@@ -52,9 +52,11 @@ pyinstaller --noconfirm --clean --distpath "${DIST}" --workpath "${DIST}/build" 
 mv "${DIST}/homecloud" "${DIST}/${ARTIFACT}"
 chmod +x "${DIST}/${ARTIFACT}"
 
-if command -v strip >/dev/null 2>&1; then
-  strip "${DIST}/${ARTIFACT}" 2>/dev/null || true
-fi
+# Do not strip onefile binaries — it corrupts the embedded archive and can
+# surface as ModuleNotFoundError (e.g. missing click) at runtime.
+
+echo "Smoke-testing ${ARTIFACT}..."
+"${DIST}/${ARTIFACT}" version
 
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "${DIST}/${ARTIFACT}" > "${DIST}/${ARTIFACT}.sha256"

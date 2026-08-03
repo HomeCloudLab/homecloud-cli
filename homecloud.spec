@@ -2,7 +2,6 @@
 """PyInstaller spec — single-file homecloud binary (CLI + SDK core bundled)."""
 
 import os
-import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -14,13 +13,31 @@ datas = []
 binaries = []
 hiddenimports = []
 
-for package in ("homecloud_core", "homecloud_sdk", "homecloud_cli"):
-    pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
+# Bundle first-party packages and CLI runtime deps that PyInstaller often misses.
+for package in (
+    "homecloud_core",
+    "homecloud_sdk",
+    "homecloud_cli",
+    "click",
+    "typer",
+    "rich",
+    "httpx",
+    "httpcore",
+    "anyio",
+    "certifi",
+    "yaml",
+    "questionary",
+):
+    try:
+        pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
+    except Exception:
+        continue
     datas += pkg_datas
     binaries += pkg_binaries
     hiddenimports += pkg_hidden
 
 hiddenimports += collect_submodules("homecloud_core") + collect_submodules("homecloud_sdk")
+hiddenimports += collect_submodules("click")
 hiddenimports += [
     "typer",
     "click",
@@ -32,6 +49,7 @@ hiddenimports += [
     "certifi",
     "anyio",
     "httpcore",
+    "questionary",
 ]
 
 a = Analysis(
@@ -45,7 +63,8 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[],
     noarchive=False,
-    optimize=1,
+    # optimize>0 has dropped imports in past PyInstaller builds; keep 0 for reliability.
+    optimize=0,
 )
 
 pyz = PYZ(a.pure)
@@ -59,7 +78,8 @@ exe = EXE(
     name="homecloud",
     debug=False,
     bootloader_ignore_signals=False,
-    strip=sys.platform != "win32",
+    # Never strip onefile binaries — strip corrupts the appended archive.
+    strip=False,
     upx=False,
     console=True,
     disable_windowed_traceback=False,

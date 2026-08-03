@@ -43,6 +43,12 @@ pyinstaller --noconfirm --clean --distpath $Dist --workpath (Join-Path $Dist "bu
 
 Move-Item -Force (Join-Path $Dist "homecloud.exe") (Join-Path $Dist $Artifact)
 
+Write-Host "Smoke-testing $Artifact..."
+& (Join-Path $Dist $Artifact) version
+if ($LASTEXITCODE -ne 0) {
+    throw "Smoke test failed: $Artifact version exited $LASTEXITCODE"
+}
+
 $hash = Get-FileHash (Join-Path $Dist $Artifact) -Algorithm SHA256
 # ASCII + LF only (Set-Content can write UTF-16/BOM/CRLF and break checksum clients)
 $shaPath = Join-Path $Dist "$Artifact.sha256"
