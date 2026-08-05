@@ -184,21 +184,35 @@ _MANAGED_EXCEPTIONS = (
 )
 
 
+# Typer vendors Click as ``typer._click``. Its exception classes are *not*
+# subclasses of the separately-installed ``click`` package, so isinstance
+# checks must cover both (standalone builds use Typer's Click).
+_TyperClick = typer._click
+_CLICK_EXIT = (typer.Exit, click.exceptions.Exit, _TyperClick.exceptions.Exit)
+_CLICK_EXCEPTION = (click.ClickException, _TyperClick.ClickException)
+_CLICK_ABORT = (click.Abort, _TyperClick.exceptions.Abort)
+_NO_ARGS_IS_HELP = getattr(_TyperClick.exceptions, "NoArgsIsHelpError", type(None))
+
+
 def _exit_with_error(exc: BaseException) -> None:
     """Top-level handler for *all* commands: short message, never a traceback.
 
     Set ``HOMECLOUD_DEBUG=1`` to re-raise unexpected errors with a full traceback.
     """
-    if isinstance(exc, (typer.Exit, click.exceptions.Exit)):
+    if isinstance(exc, _CLICK_EXIT):
         code = getattr(exc, "exit_code", None)
         raise SystemExit(0 if code is None else code)
     if isinstance(exc, SystemExit):
         raise exc
-    if isinstance(exc, click.ClickException):
+    # ``no_args_is_help``: Rich help is already printed via ctx.get_help();
+    # treat as a clean exit (not an error / PyInstaller crash).
+    if isinstance(exc, _NO_ARGS_IS_HELP):
+        raise SystemExit(0)
+    if isinstance(exc, _CLICK_EXCEPTION):
         # BadParameter, UsageError, etc. — Click's own one-line messages
         exc.show()
         raise SystemExit(exc.exit_code)
-    if isinstance(exc, (click.Abort, KeyboardInterrupt)):
+    if isinstance(exc, (*_CLICK_ABORT, KeyboardInterrupt)):
         _print_error("Aborted.")
         raise SystemExit(130 if isinstance(exc, KeyboardInterrupt) else 1)
     if _is_cancelled(exc):
@@ -275,8 +289,8 @@ def update_cmd(
 ) -> None:
     """Check for or install a HomeCloud CLI standalone binary release.
 
-    From a pip/source install, downloads the binary into the default install
-    directory (same as the installer). From a standalone binary, replaces itself.
+    Always writes to the default install directory (same as the installer), even
+    when launched from a Downloads copy of the binary.
     """
     from homecloud_cli.update import check_for_update, install_version
 
@@ -308,6 +322,34 @@ def update_cmd(
         typer.echo(f"Already up to date ({result.version}).")
     else:
         typer.echo(f"Installed homecloud {result.version}")
+        typer.echo(f"Location: {result.path}")
+        if result.path_updated:
+            typer.echo("PATH updated — open a new terminal to use `homecloud`.")
+
+
+@app.command("install")
+def install_cmd(
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Replace the installed binary even if the same or a newer version is present",
+        ),
+    ] = False,
+) -> None:
+    """Install this standalone binary into the default location and user PATH.
+
+    On Windows, double-clicking the downloaded exe from Explorer also runs this
+    flow. From a terminal with no arguments, the CLI shows help instead.
+    """
+    from homecloud_cli.bootstrap import print_cli_install_result
+    from homecloud_cli.update import install_from_running_binary
+
+    try:
+        result = install_from_running_binary(force=force)
+    except HomeCloudError as exc:
+        _handle_error(exc)
+    print_cli_install_result(result)
 
 
 @app.callback()
@@ -1434,6 +1476,10 @@ def mail_attachment(
 def main() -> None:
     """CLI entrypoint — catch every failure so users never see a Python traceback."""
     try:
+        from homecloud_cli.bootstrap import maybe_self_install
+
+        if maybe_self_install():
+            return
         # standalone_mode=False: Click/Typer re-raise instead of printing their own
         # stacks; we format everything in ``_exit_with_error``.
         app(standalone_mode=False)

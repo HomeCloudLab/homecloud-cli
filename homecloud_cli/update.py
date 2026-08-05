@@ -37,6 +37,8 @@ class InstallResult:
     replaced_running: bool
     changed: bool = True
     path_updated: bool = False
+    # Local install only: "same_version" | "newer_installed"
+    skipped_reason: str | None = None
 
 
 def releases_base() -> str:
@@ -128,6 +130,10 @@ def check_for_update() -> VersionCheck:
     )
 
 
+def binary_name() -> str:
+    return "homecloud.exe" if os.name == "nt" else "homecloud"
+
+
 def default_install_dir() -> Path:
     """Same defaults as install.ps1 / install.sh (overridable via HOMECLOUD_INSTALL_DIR)."""
     override = os.environ.get("HOMECLOUD_INSTALL_DIR")
@@ -135,20 +141,49 @@ def default_install_dir() -> Path:
         return Path(override).expanduser()
     if os.name == "nt":
         local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        return Path(local) / "Programs" / "homecloud"
+        return Path(local) / "Programs" / "HomeCloud"
     return Path.home() / ".local" / "bin"
 
 
-def install_target_path() -> Path:
-    """Path of the binary that ``homecloud update`` writes.
+def legacy_install_dir() -> Path | None:
+    """Pre-0.2.36 Windows install dir (``...\\Programs\\homecloud``)."""
+    if os.name != "nt":
+        return None
+    override = os.environ.get("HOMECLOUD_INSTALL_DIR")
+    if override:
+        return None
+    local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(local) / "Programs" / "homecloud"
 
-    Standalone replaces the running executable. Source / pip installs the
-    published binary into the default install location (same as the installer).
+
+def install_target_path() -> Path:
+    """Path of the binary that ``homecloud update`` / ``install`` write.
+
+    Always the default install location (not the Downloads copy), so
+    ``homecloud-windows-amd64.exe update`` upgrades the installed CLI.
     """
-    if is_standalone():
-        return Path(sys.executable).resolve()
-    name = "homecloud.exe" if os.name == "nt" else "homecloud"
-    return default_install_dir() / name
+    return default_install_dir() / binary_name()
+
+
+def is_running_installed_copy() -> bool:
+    """True when this process is the installed standalone binary."""
+    if not is_standalone():
+        return False
+    try:
+        exe = Path(sys.executable).resolve()
+    except OSError:
+        return False
+    candidates = [install_target_path()]
+    legacy = legacy_install_dir()
+    if legacy is not None:
+        candidates.append(legacy / binary_name())
+    for candidate in candidates:
+        try:
+            if exe == candidate.resolve():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def read_binary_version(path: Path) -> str | None:
@@ -184,8 +219,15 @@ def path_points_at_standalone(target: Path | None = None) -> bool:
         return False
 
 
-def _ensure_dir_on_user_path(directory: Path) -> bool:
-    """Put ``directory`` first on the user PATH (Windows). Returns True if changed."""
+def _ensure_dir_on_user_path(
+    directory: Path,
+    *,
+    remove_dirs: list[Path] | None = None,
+) -> bool:
+    """Put ``directory`` first on the user PATH (Windows). Returns True if changed.
+
+    Dedupes entries and optionally drops legacy install dirs (e.g. ``...\\homecloud``).
+    """
     if os.name != "nt":
         return False
     try:
@@ -194,6 +236,11 @@ def _ensure_dir_on_user_path(directory: Path) -> bool:
         return False
 
     dir_str = str(directory.resolve())
+    remove_norms = {
+        os.path.normcase(str(p.resolve()))
+        for p in (remove_dirs or [])
+        if p is not None
+    }
     with winreg.OpenKey(
         winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_SET_VALUE
     ) as key:
@@ -203,9 +250,20 @@ def _ensure_dir_on_user_path(directory: Path) -> bool:
             current = ""
         parts = [p for p in str(current).split(";") if p]
         norm = os.path.normcase(dir_str)
+        without: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            part_norm = os.path.normcase(part)
+            if part_norm == norm or part_norm in remove_norms:
+                continue
+            if part_norm in seen:
+                continue
+            seen.add(part_norm)
+            without.append(part)
         already_first = bool(parts) and os.path.normcase(parts[0]) == norm
-        without = [p for p in parts if os.path.normcase(p) != norm]
-        if already_first and len(without) == len(parts) - 1:
+        legacy_present = any(os.path.normcase(p) in remove_norms for p in parts)
+        dupes = len(parts) != len({os.path.normcase(p) for p in parts})
+        if already_first and not legacy_present and not dupes and len(without) == len(parts) - 1:
             return False
         # Prefer the standalone dir first so it wins over pip Scripts.
         new_path = ";".join([dir_str, *without])
@@ -213,6 +271,15 @@ def _ensure_dir_on_user_path(directory: Path) -> bool:
         return True
     # Do not mutate this process PATH — the parent shell still has the old one.
     # Callers should tell the user to open a new terminal when needed.
+
+
+def _path_dirs_to_remove() -> list[Path]:
+    legacy = legacy_install_dir()
+    return [legacy] if legacy is not None else []
+
+
+def _ensure_install_path(directory: Path) -> bool:
+    return _ensure_dir_on_user_path(directory, remove_dirs=_path_dirs_to_remove())
 
 
 def _sha256_file(path: Path) -> str:
@@ -292,12 +359,95 @@ def _replace_binary(downloaded: Path, target: Path) -> None:
         os.replace(downloaded, target)
 
 
+def install_from_running_binary(*, force: bool = False) -> InstallResult:
+    """Copy this standalone executable into the default install location (no network)."""
+    if not is_standalone():
+        raise HomeCloudError(
+            "homecloud install only works from a standalone binary.\n"
+            "Use: homecloud update   or the platform install script."
+        )
+
+    source = Path(sys.executable).resolve()
+    target = install_target_path()
+    running_version = normalize_version_string(__version__)
+    replaced_running = source == target.resolve()
+    src_hash = _sha256_file(source)
+
+    if replaced_running:
+        path_updated = _ensure_install_path(target.parent)
+        return InstallResult(
+            version=running_version,
+            path=target,
+            replaced_running=True,
+            changed=False,
+            path_updated=path_updated,
+            skipped_reason="same_version",
+        )
+
+    installed = read_binary_version(target)
+    if installed is not None and not force:
+        if parse_semver(installed) == parse_semver(running_version):
+            path_updated = _ensure_install_path(target.parent)
+            return InstallResult(
+                version=running_version,
+                path=target,
+                replaced_running=False,
+                changed=False,
+                path_updated=path_updated,
+                skipped_reason="same_version",
+            )
+        if parse_semver(installed) > parse_semver(running_version):
+            return InstallResult(
+                version=installed,
+                path=target,
+                replaced_running=False,
+                changed=False,
+                path_updated=False,
+                skipped_reason="newer_installed",
+            )
+
+    with tempfile.TemporaryDirectory(prefix="homecloud-install-") as tmp:
+        staging = Path(tmp) / target.name
+        shutil.copy2(source, staging)
+        if _sha256_file(staging) != src_hash:
+            raise HomeCloudError("Copy verification failed before replace (SHA256 mismatch)")
+        _replace_binary(staging, target)
+
+    if not target.is_file() or _sha256_file(target) != src_hash:
+        try:
+            if target.is_file():
+                target.unlink()
+        except OSError:
+            pass
+        raise HomeCloudError("Copy verification failed after install (SHA256 mismatch)")
+
+    if os.name != "nt":
+        try:
+            os.chmod(target, 0o755)
+        except OSError:
+            pass
+
+    path_updated = _ensure_install_path(target.parent)
+    return InstallResult(
+        version=running_version,
+        path=target,
+        replaced_running=False,
+        changed=True,
+        path_updated=path_updated,
+    )
+
+
 def install_version(version: str | None = None, *, force: bool = False) -> InstallResult:
     """Download and install ``latest`` or a pinned ``vX.Y.Z``."""
     channel = normalize_channel(version)
     _platform, artifact = platform_artifact()
     target = install_target_path()
-    replaced_running = is_standalone()
+    try:
+        replaced_running = (
+            is_standalone() and Path(sys.executable).resolve() == target.resolve()
+        )
+    except OSError:
+        replaced_running = False
 
     if channel == "latest":
         resolved = fetch_latest_version()
@@ -308,19 +458,13 @@ def install_version(version: str | None = None, *, force: bool = False) -> Insta
     # checksum cannot race while a new release is uploading to latest/.
     asset_channel = f"v{resolved}"
 
-    installed = (
-        normalize_version_string(__version__)
-        if replaced_running
-        else read_binary_version(target)
-    )
+    installed = read_binary_version(target)
     if (
         not force
         and installed is not None
         and parse_semver(installed) == parse_semver(resolved)
     ):
-        path_updated = False
-        if not replaced_running:
-            path_updated = _ensure_dir_on_user_path(target.parent)
+        path_updated = _ensure_install_path(target.parent)
         return InstallResult(
             version=resolved,
             path=target,
@@ -338,9 +482,7 @@ def install_version(version: str | None = None, *, force: bool = False) -> Insta
         _verify_checksum(tmp_path, checksum_url)
         _replace_binary(tmp_path, target)
 
-    path_updated = False
-    if not replaced_running:
-        path_updated = _ensure_dir_on_user_path(target.parent)
+    path_updated = _ensure_install_path(target.parent)
 
     return InstallResult(
         version=resolved,

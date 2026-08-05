@@ -90,7 +90,7 @@ def test_update_from_source_installs_binary(
     result = runner.invoke(app, ["update"])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "Installed homecloud 9.9.9" in result.stdout
-    assert "new terminal" not in result.stdout.lower()
+    assert "new terminal" in result.stdout.lower()
 
 
 def test_update_skips_when_binary_already_current(
@@ -156,6 +156,107 @@ def test_install_target_path_source_uses_default_dir(
     assert path.name in {"homecloud", "homecloud.exe"}
 
 
+def test_install_target_path_standalone_uses_default_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Update/install always write to the install dir, not Downloads."""
+    from homecloud_cli import update as update_mod
+
+    monkeypatch.setattr(update_mod, "is_standalone", lambda: True)
+    monkeypatch.setattr(update_mod, "default_install_dir", lambda: tmp_path)
+    monkeypatch.setattr(update_mod.sys, "executable", str(tmp_path / "Downloads" / "homecloud.exe"))
+    path = update_mod.install_target_path()
+    assert path == tmp_path / update_mod.binary_name()
+
+
+def test_default_install_dir_windows_homecloud(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from homecloud_cli import update as update_mod
+
+    monkeypatch.delenv("HOMECLOUD_INSTALL_DIR", raising=False)
+    monkeypatch.setattr(update_mod.os, "name", "nt")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert update_mod.default_install_dir() == tmp_path / "Programs" / "HomeCloud"
+    assert update_mod.legacy_install_dir() == tmp_path / "Programs" / "homecloud"
+
+
+def test_install_from_running_binary_copies_and_verifies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from homecloud_cli import update as update_mod
+
+    source = tmp_path / "download.exe"
+    source.write_bytes(b"homecloud-binary-v1")
+    install_dir = tmp_path / "HomeCloud"
+    target = install_dir / "homecloud.exe"
+
+    monkeypatch.setattr(update_mod, "is_standalone", lambda: True)
+    monkeypatch.setattr(update_mod.sys, "executable", str(source))
+    monkeypatch.setattr(update_mod, "install_target_path", lambda: target)
+    monkeypatch.setattr(update_mod, "__version__", "0.2.36")
+    monkeypatch.setattr(update_mod, "read_binary_version", lambda _p: None)
+    monkeypatch.setattr(update_mod, "_ensure_install_path", lambda _p: True)
+
+    result = update_mod.install_from_running_binary()
+    assert result.changed is True
+    assert result.path_updated is True
+    assert result.skipped_reason is None
+    assert target.read_bytes() == b"homecloud-binary-v1"
+    assert update_mod._sha256_file(source) == update_mod._sha256_file(target)
+
+
+def test_install_from_running_binary_skips_same_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from homecloud_cli import update as update_mod
+
+    source = tmp_path / "download.exe"
+    source.write_bytes(b"same")
+    target = tmp_path / "HomeCloud" / "homecloud.exe"
+    target.parent.mkdir()
+    target.write_bytes(b"installed")
+
+    monkeypatch.setattr(update_mod, "is_standalone", lambda: True)
+    monkeypatch.setattr(update_mod.sys, "executable", str(source))
+    monkeypatch.setattr(update_mod, "install_target_path", lambda: target)
+    monkeypatch.setattr(update_mod, "__version__", "0.2.36")
+    monkeypatch.setattr(update_mod, "read_binary_version", lambda _p: "0.2.36")
+    monkeypatch.setattr(update_mod, "_ensure_install_path", lambda _p: False)
+
+    result = update_mod.install_from_running_binary()
+    assert result.changed is False
+    assert result.skipped_reason == "same_version"
+    assert target.read_bytes() == b"installed"
+
+
+def test_install_from_running_binary_refuses_downgrade_without_force(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from homecloud_cli import update as update_mod
+
+    source = tmp_path / "download.exe"
+    source.write_bytes(b"old")
+    target = tmp_path / "homecloud.exe"
+    target.write_bytes(b"new")
+
+    monkeypatch.setattr(update_mod, "is_standalone", lambda: True)
+    monkeypatch.setattr(update_mod.sys, "executable", str(source))
+    monkeypatch.setattr(update_mod, "install_target_path", lambda: target)
+    monkeypatch.setattr(update_mod, "__version__", "0.2.30")
+    monkeypatch.setattr(update_mod, "read_binary_version", lambda _p: "0.2.40")
+
+    result = update_mod.install_from_running_binary()
+    assert result.changed is False
+    assert result.skipped_reason == "newer_installed"
+    assert target.read_bytes() == b"new"
+
+    monkeypatch.setattr(update_mod, "_ensure_install_path", lambda _p: False)
+    forced = update_mod.install_from_running_binary(force=True)
+    assert forced.changed is True
+    assert target.read_bytes() == b"old"
+
+
 def test_install_version_downloads_pinned_channel(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -168,7 +269,7 @@ def test_install_version_downloads_pinned_channel(
     monkeypatch.setattr(update_mod, "install_target_path", lambda: target)
     monkeypatch.setattr(update_mod, "platform_artifact", lambda: ("windows-amd64", "bin.exe"))
     monkeypatch.setattr(update_mod, "fetch_latest_version", lambda: "9.9.9")
-    monkeypatch.setattr(update_mod, "_ensure_dir_on_user_path", lambda _p: False)
+    monkeypatch.setattr(update_mod, "_ensure_install_path", lambda _p: False)
 
     def fake_download(url: str, dest: Path) -> None:
         seen["url"] = url
@@ -202,7 +303,7 @@ def test_install_version_skips_download_when_target_current(
     monkeypatch.setattr(update_mod, "install_target_path", lambda: target)
     monkeypatch.setattr(update_mod, "fetch_latest_version", lambda: "0.2.31")
     monkeypatch.setattr(update_mod, "read_binary_version", lambda _p: "0.2.31")
-    monkeypatch.setattr(update_mod, "_ensure_dir_on_user_path", lambda _p: False)
+    monkeypatch.setattr(update_mod, "_ensure_install_path", lambda _p: False)
     monkeypatch.setattr(
         update_mod,
         "_download_binary",

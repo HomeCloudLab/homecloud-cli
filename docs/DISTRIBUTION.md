@@ -23,6 +23,8 @@ Windows:
 irm https://homecloud-cli.so.holab.abrdns.com/install/install.ps1 | iex
 ```
 
+Or download `homecloud-windows-amd64.exe` and double-click it in Explorer (installs to `%LOCALAPPDATA%\Programs\HomeCloud`).
+
 Or download the binary directly:
 
 ```text

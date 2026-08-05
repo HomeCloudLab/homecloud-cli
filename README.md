@@ -17,6 +17,8 @@ curl -fsSL https://homecloud-cli.so.holab.abrdns.com/install/install.sh | bash
 irm https://homecloud-cli.so.holab.abrdns.com/install/install.ps1 | iex
 ```
 
+**Windows (double-click):** download `homecloud-windows-amd64.exe` and open it from Explorer — it installs to `%LOCALAPPDATA%\Programs\HomeCloud` and updates User PATH. Then open a new terminal and run `homecloud configure` or `homecloud login`.
+
 Direct binary URLs: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md)
 
 ```bash

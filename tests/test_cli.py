@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import httpx
@@ -30,6 +31,44 @@ def test_cli_version(runner: CliRunner) -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert f"homecloud {__version__}" in result.stdout
+
+
+def test_cli_no_args_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Running with no args shows help and must not raise / traceback (PyInstaller)."""
+    from homecloud_cli.cli import main
+
+    monkeypatch.setattr(sys, "argv", ["homecloud"])
+    # Source install: never auto-install; show help.
+    monkeypatch.setenv("HOMECLOUD_NO_AUTO_INSTALL", "1")
+    with pytest.raises(SystemExit) as ei:
+        main()
+    assert ei.value.code == 0
+
+
+def test_cli_no_args_from_terminal_does_not_auto_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from homecloud_cli import bootstrap
+    from homecloud_cli.cli import main
+
+    called = {"install": False}
+
+    monkeypatch.setattr(sys, "argv", ["homecloud-windows-amd64.exe"])
+    monkeypatch.setattr(bootstrap, "is_standalone", lambda: True)
+    monkeypatch.setattr(bootstrap.os, "name", "nt")
+    monkeypatch.setattr(bootstrap, "is_running_installed_copy", lambda: False)
+    monkeypatch.setattr(bootstrap, "parent_is_explorer", lambda: False)
+    monkeypatch.delenv("HOMECLOUD_NO_AUTO_INSTALL", raising=False)
+    monkeypatch.setattr(
+        bootstrap,
+        "install_from_running_binary",
+        lambda **_: called.__setitem__("install", True),
+    )
+
+    with pytest.raises(SystemExit) as ei:
+        main()
+    assert ei.value.code == 0
+    assert called["install"] is False
 
 
 def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
