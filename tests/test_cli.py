@@ -92,7 +92,11 @@ def test_configure_import(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runne
     assert result.exit_code == 0, result.stdout
 
     saved = json.loads(cred_file.read_text(encoding="utf-8"))
-    assert saved["profiles"]["default"]["access_key_id"] == "HCAKIMPORT"
+    profile = saved["profiles"]["default"]
+    assert profile["access_key_id"] == "HCAKIMPORT"
+    assert profile["secret_access_key"] == "secret"
+    assert "apex" not in profile
+    assert "default_account_id" not in profile
 
 
 def test_mq_send_delegates_to_sdk(
