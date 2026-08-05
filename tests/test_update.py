@@ -172,13 +172,26 @@ def test_install_target_path_standalone_uses_default_dir(
 def test_default_install_dir_windows_homecloud(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Windows default dir is Programs\\HomeCloud (skip Path flavor issues on Linux CI)."""
+    import os
+
     from homecloud_cli import update as update_mod
 
+    if os.name != "nt":
+        pytest.skip("WindowsPath cannot be constructed on POSIX when os.name is patched")
+
     monkeypatch.delenv("HOMECLOUD_INSTALL_DIR", raising=False)
-    monkeypatch.setattr(update_mod.os, "name", "nt")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert update_mod.default_install_dir() == tmp_path / "Programs" / "HomeCloud"
     assert update_mod.legacy_install_dir() == tmp_path / "Programs" / "homecloud"
+
+
+def test_default_install_dir_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from homecloud_cli import update as update_mod
+
+    monkeypatch.setenv("HOMECLOUD_INSTALL_DIR", str(tmp_path / "custom"))
+    assert update_mod.default_install_dir() == tmp_path / "custom"
+    assert update_mod.legacy_install_dir() is None
 
 
 def test_install_from_running_binary_copies_and_verifies(
