@@ -282,6 +282,139 @@ def _ensure_install_path(directory: Path) -> bool:
     return _ensure_dir_on_user_path(directory, remove_dirs=_path_dirs_to_remove())
 
 
+@dataclass(frozen=True)
+class UninstallResult:
+    removed_paths: tuple[Path, ...]
+    path_updated: bool
+    running_binary_deferred: bool = False
+
+
+def _remove_dirs_from_user_path(directories: list[Path]) -> bool:
+    """Remove ``directories`` from the Windows user PATH. Returns True if changed."""
+    if os.name != "nt" or not directories:
+        return False
+    try:
+        import winreg
+    except ImportError:
+        return False
+
+    remove_norms = {
+        os.path.normcase(str(p.resolve()))
+        for p in directories
+        if p is not None
+    }
+    if not remove_norms:
+        return False
+
+    with winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_SET_VALUE
+    ) as key:
+        try:
+            current, _ = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            return False
+        parts = [p for p in str(current).split(";") if p]
+        kept = [p for p in parts if os.path.normcase(p) not in remove_norms]
+        if kept == parts:
+            return False
+        winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(kept))
+        return True
+
+
+def _delete_binary(path: Path, *, defer_if_locked: bool) -> tuple[bool, bool]:
+    """Delete ``path``. Returns ``(removed, deferred)``.
+
+    On Windows, a running executable often cannot be unlinked; rename to ``.old``
+    and treat that as deferred removal of the active copy.
+    """
+    if not path.is_file():
+        return False, False
+    try:
+        path.unlink()
+        return True, False
+    except OSError:
+        if not defer_if_locked or os.name != "nt":
+            raise
+        old = path.with_suffix(path.suffix + ".old")
+        try:
+            if old.exists():
+                old.unlink()
+        except OSError:
+            pass
+        path.replace(old)
+        try:
+            old.unlink()
+            return True, False
+        except OSError:
+            return True, True
+
+
+def _try_remove_empty_dir(directory: Path) -> None:
+    try:
+        if directory.is_dir() and not any(directory.iterdir()):
+            directory.rmdir()
+    except OSError:
+        pass
+
+
+def uninstall_standalone() -> UninstallResult:
+    """Remove the standalone CLI binary and its User PATH entries."""
+    targets: list[Path] = [install_target_path()]
+    legacy = legacy_install_dir()
+    if legacy is not None:
+        targets.append(legacy / binary_name())
+
+    # Include pre-existing ``.old`` sidecars (from a prior update/uninstall).
+    candidates: list[Path] = []
+    for target in targets:
+        candidates.append(target)
+        old = target.with_suffix(target.suffix + ".old")
+        if old.is_file():
+            candidates.append(old)
+
+    try:
+        running = Path(sys.executable).resolve() if is_standalone() else None
+    except OSError:
+        running = None
+
+    removed: list[Path] = []
+    deferred = False
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        defer = bool(running is not None and resolved == running)
+        try:
+            did_remove, was_deferred = _delete_binary(path, defer_if_locked=defer)
+        except OSError as exc:
+            raise HomeCloudError(f"Cannot remove {path}: {exc}") from exc
+        if did_remove:
+            removed.append(path)
+            deferred = deferred or was_deferred
+    dirs_to_scrub = [default_install_dir()]
+    if legacy is not None:
+        dirs_to_scrub.append(legacy)
+    path_updated = _remove_dirs_from_user_path(dirs_to_scrub)
+
+    for directory in dirs_to_scrub:
+        _try_remove_empty_dir(directory)
+
+    if not removed and not path_updated:
+        raise HomeCloudError(
+            "No HomeCloud CLI standalone install found to remove.\n"
+            f"Expected: {install_target_path()}"
+        )
+
+    return UninstallResult(
+        removed_paths=tuple(removed),
+        path_updated=path_updated,
+        running_binary_deferred=deferred,
+    )
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:

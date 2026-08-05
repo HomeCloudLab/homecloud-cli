@@ -329,6 +329,57 @@ def test_install_version_skips_download_when_target_current(
     assert called["download"] is False
 
 
+def test_uninstall_standalone_removes_binary_and_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from homecloud_cli import update as update_mod
+    from homecloud_core.errors import HomeCloudError
+
+    install_dir = tmp_path / "HomeCloud"
+    target = install_dir / "homecloud.exe"
+    install_dir.mkdir()
+    target.write_bytes(b"bin")
+
+    path_calls = {"n": 0}
+
+    def fake_remove_path(_dirs: list[Path]) -> bool:
+        path_calls["n"] += 1
+        return path_calls["n"] == 1
+
+    monkeypatch.setattr(update_mod, "default_install_dir", lambda: install_dir)
+    monkeypatch.setattr(update_mod, "legacy_install_dir", lambda: None)
+    monkeypatch.setattr(update_mod, "is_standalone", lambda: False)
+    monkeypatch.setattr(update_mod, "_remove_dirs_from_user_path", fake_remove_path)
+
+    result = update_mod.uninstall_standalone()
+    assert target in result.removed_paths
+    assert not target.exists()
+    assert result.path_updated is True
+    assert not install_dir.exists()
+
+    with pytest.raises(HomeCloudError, match="No HomeCloud CLI"):
+        update_mod.uninstall_standalone()
+
+
+def test_uninstall_cmd(runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from homecloud_cli import update as update_mod
+
+    monkeypatch.setattr(
+        update_mod,
+        "uninstall_standalone",
+        lambda: update_mod.UninstallResult(
+            removed_paths=(tmp_path / "homecloud.exe",),
+            path_updated=True,
+            running_binary_deferred=False,
+        ),
+    )
+    monkeypatch.setattr(update_mod, "install_target_path", lambda: tmp_path / "homecloud.exe")
+    result = runner.invoke(app, ["uninstall", "--yes"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "uninstalled" in result.stdout.lower()
+    assert "PATH" in result.stdout
+
+
 def test_parse_sha256_line() -> None:
     from homecloud_cli.update import _parse_sha256_line
 

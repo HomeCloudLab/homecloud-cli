@@ -352,6 +352,49 @@ def install_cmd(
     print_cli_install_result(result)
 
 
+@app.command("uninstall")
+def uninstall_cmd(
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Do not prompt for confirmation"),
+    ] = False,
+) -> None:
+    """Remove the standalone CLI binary and its User PATH entry.
+
+    Does not delete saved credentials or config (``~/.homecloud`` / ``%USERPROFILE%\\.homecloud``).
+    """
+    from homecloud_cli.update import install_target_path, uninstall_standalone
+
+    target = install_target_path()
+    if not yes:
+        typer.echo(f"This will remove the HomeCloud CLI binary at:\n  {target}")
+        typer.echo("Credentials/config are kept.")
+        confirm = typer.confirm("Continue?", default=False)
+        if not confirm:
+            typer.echo("Cancelled.")
+            raise typer.Exit(code=1)
+
+    try:
+        result = uninstall_standalone()
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+    if result.removed_paths:
+        typer.echo("Removed:")
+        for path in result.removed_paths:
+            typer.echo(f"  {path}")
+    if result.path_updated:
+        typer.echo("Removed install directory from User PATH.")
+    if result.running_binary_deferred:
+        typer.echo(
+            "Note: the running executable was renamed; close this terminal so Windows "
+            "can finish cleanup."
+        )
+    typer.echo("HomeCloud CLI uninstalled.")
+    if result.path_updated:
+        typer.echo("Open a new terminal for PATH changes to take effect.")
+
+
 @app.callback()
 def main_callback(
     version: Annotated[
