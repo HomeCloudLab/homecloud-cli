@@ -336,7 +336,7 @@ def test_uninstall_standalone_removes_binary_and_path(
     from homecloud_core.errors import HomeCloudError
 
     install_dir = tmp_path / "HomeCloud"
-    target = install_dir / "homecloud.exe"
+    target = install_dir / update_mod.binary_name()
     install_dir.mkdir()
     target.write_bytes(b"bin")
 
