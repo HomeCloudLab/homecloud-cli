@@ -39,6 +39,9 @@ so_app = typer.Typer(help="Object storage commands")
 fn_app = typer.Typer(help="Functions commands")
 mail_app = typer.Typer(help="Mail commands")
 ir_app = typer.Typer(help="Image Registry (IR) commands")
+billing_app = typer.Typer(help="Billing commands")
+usage_app = typer.Typer(help="Usage meter commands")
+monitoring_app = typer.Typer(help="Monitoring commands")
 
 app.add_typer(configure_app, name="configure")
 app.add_typer(config_app, name="config")
@@ -50,6 +53,9 @@ app.add_typer(so_app, name="so")
 app.add_typer(fn_app, name="fn")
 app.add_typer(mail_app, name="mail")
 app.add_typer(ir_app, name="ir")
+app.add_typer(usage_app, name="usage")
+app.add_typer(billing_app, name="billing")
+app.add_typer(monitoring_app, name="monitoring")
 
 
 def _profile_option(profile: Optional[str]) -> str | None:
@@ -1512,6 +1518,83 @@ def mail_attachment(
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(raw)
         typer.echo(f"Wrote {len(raw)} bytes to {dest}")
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@usage_app.command("list")
+def usage_list(
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+    group_by: Annotated[str, typer.Option("--group-by")] = "metric",
+) -> None:
+    """Show metered usage quantities (no prices)."""
+    try:
+        data = _client(profile).usage.list(group_by=group_by)
+        emit(data, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@billing_app.command("summary")
+def billing_summary(
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Month-to-date estimate (USD)."""
+    try:
+        emit(_client(profile).billing.summary(), output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@billing_app.command("forecast")
+def billing_forecast(
+    horizon: Annotated[int, typer.Option("--horizon")] = 30,
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Period forecast (Estimate)."""
+    try:
+        emit(_client(profile).billing.forecast(horizon), output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@billing_app.command("invoices")
+def billing_invoices(
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "table",
+) -> None:
+    """List invoices."""
+    try:
+        items = _client(profile).billing.invoices()
+        emit(items, output_format=_output_option(output), columns=["number", "period", "status", "total_cents"])
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@monitoring_app.command("workspace")
+def monitoring_workspace(
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Show the account Monitoring workspace."""
+    try:
+        emit(_client(profile).monitoring.workspace(), output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@monitoring_app.command("dashboards")
+def monitoring_dashboards(
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "table",
+) -> None:
+    """List default Monitoring dashboards."""
+    try:
+        items = _client(profile).monitoring.dashboards()
+        emit(items, output_format=_output_option(output), columns=["id", "title", "metric"])
     except HomeCloudError as exc:
         _handle_error(exc)
 
