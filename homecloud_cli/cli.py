@@ -1067,13 +1067,27 @@ def so_ls(
     bucket: Annotated[str, typer.Argument(help="Bucket name")],
     prefix: Annotated[str, typer.Option(help="Object key prefix")] = "",
     recursive: Annotated[bool, typer.Option(help="List recursively")] = False,
+    name: Annotated[
+        Optional[str],
+        typer.Option(
+            "--name",
+            help="Case-insensitive substring filter on object keys (after full pagination)",
+        ),
+    ] = None,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "table",
 ) -> None:
-    """List objects in a bucket (data plane — Access Key)."""
+    """List objects in a bucket (data plane — Access Key). Paginates all pages."""
     try:
-        data = _client(profile).so.list_objects(bucket, prefix=prefix, recursive=recursive)
-        items = data.get("items", [])
+        items = _client(profile).so.list_all_objects(
+            bucket,
+            prefix=prefix,
+            recursive=recursive,
+            include_dirs=not recursive,
+        )
+        if name:
+            needle = name.lower()
+            items = [item for item in items if needle in str(item.get("key", "")).lower()]
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(items, output_format=_output_option(output), columns=["key", "size", "last_modified"])
@@ -1086,26 +1100,44 @@ def so_cp(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format (json suppresses live progress)")] = "table",
 ) -> None:
-    """Copy a file local ↔ bucket. Upload: ./file so://b/k  Download: so://b/k ./file"""
+    """Copy a file local ↔ bucket, or server-side SO → SO (same or cross-bucket)."""
     source_is_so = _is_so_uri(source)
     dest_is_so = _is_so_uri(destination)
 
-    if source_is_so and dest_is_so:
-        raise typer.BadParameter(
-            "Cannot copy remote to remote. Use: homecloud so cp ./local so://bucket/key "
-            "or: homecloud so cp so://bucket/key ./local"
-        )
     if not source_is_so and not dest_is_so:
         raise typer.BadParameter(
             "One argument must be a so:// URI. Upload: homecloud so cp ./local so://bucket/key "
-            "Download: homecloud so cp so://bucket/key ./local"
+            "Download: homecloud so cp so://bucket/key ./local "
+            "Remote: homecloud so cp so://src/key so://dest/key"
         )
 
     client = _client(profile)
     show_progress = _show_transfer_progress(output)
 
     try:
-        if source_is_so:
+        if source_is_so and dest_is_so:
+            src_bucket, src_key = _parse_so_uri(source)
+            dst_bucket, dst_key = _parse_so_uri(destination)
+            if not src_key:
+                raise typer.BadParameter("source must be so://bucket/key or bucket/key")
+            if not dst_key:
+                # Destination is bucket root — keep source basename
+                dst_key = src_key.rsplit("/", 1)[-1]
+            elif dst_key.endswith("/"):
+                dst_key = f"{dst_key}{src_key.rsplit('/', 1)[-1]}"
+            source_bucket = src_bucket if src_bucket != dst_bucket else None
+            uri = f"{_format_so_uri(src_bucket, src_key)} → {_format_so_uri(dst_bucket, dst_key)}"
+            if show_progress:
+                typer.echo(f"Copying {uri} (server-side)…")
+            result = client.so.copy(
+                dst_bucket,
+                src_key,
+                dst_key,
+                source_bucket=source_bucket,
+            )
+            if show_progress:
+                typer.echo("Copied.")
+        elif source_is_so:
             bucket_name, object_key = _parse_so_uri(source)
             if not object_key:
                 raise typer.BadParameter("source must be so://bucket/key or bucket/key")
