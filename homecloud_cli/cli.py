@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
@@ -812,25 +814,25 @@ def mq_purge_dlq(
 
 
 def _is_so_uri(target: str) -> bool:
-    lowered = target.lower()
-    return lowered.startswith("so://") or lowered.startswith("s3://")
+    from homecloud_core.so_paths import is_so_uri
+
+    return is_so_uri(target)
 
 
 def _parse_so_uri(target: str) -> tuple[str, str]:
     """Return (bucket, key_prefix) from so://bucket/path or bucket/path."""
-    cleaned = target.removeprefix("so://").removeprefix("s3://").strip("/")
-    if not cleaned:
-        raise typer.BadParameter("URI must include a bucket name")
-    parts = cleaned.split("/", 1)
-    bucket_name = parts[0]
-    key_prefix = parts[1] if len(parts) > 1 else ""
-    return bucket_name, key_prefix
+    from homecloud_core.so_paths import parse_so_uri
+
+    try:
+        return parse_so_uri(target)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _format_so_uri(bucket: str, key: str = "") -> str:
-    if key:
-        return f"so://{bucket}/{key.lstrip('/')}"
-    return f"so://{bucket}/"
+    from homecloud_core.so_paths import format_so_uri
+
+    return format_so_uri(bucket, key)
 
 
 def _show_transfer_progress(output: str) -> bool:
@@ -840,7 +842,7 @@ def _show_transfer_progress(output: str) -> bool:
 def _run_so_sync_transfer(
     *,
     label: str,
-    action: Literal["upload", "download"],
+    action: Literal["upload", "download", "copy"],
     show_progress: bool,
     sync_call: Callable[..., dict[str, int]],
 ) -> dict[str, Any]:
@@ -881,32 +883,25 @@ def _run_so_sync_transfer(
         else:
             Console(stderr=True).print(f"[cyan]{msg}[/]")
 
-    file_done = on_file_complete
-    kwargs: dict[str, Any] = {
-        "on_transfer_begin": on_transfer_begin,
-        "on_bytes": on_bytes,
-        "on_file_begin": on_file_begin,
-        "on_skip": on_skip,
-        "on_delete": on_delete,
-        "on_status": on_status,
-    }
-    if action == "upload":
-        kwargs["on_upload"] = file_done
-    else:
-        kwargs["on_download"] = file_done
-
     try:
-        return sync_call(**kwargs)
+        return sync_call(
+            on_transfer_begin=on_transfer_begin,
+            on_bytes=on_bytes,
+            on_file_begin=on_file_begin,
+            on_transfer=on_file_complete,
+            on_skip=on_skip,
+            on_delete=on_delete,
+            on_status=on_status,
+        )
     finally:
         if progress is not None:
             progress.__exit__(None, None, None)
 
 
-def _run_so_sync_upload(
+def _run_so_sync(
     client: HomeCloudClient,
-    local_path: Path,
-    bucket_name: str,
-    prefix: str,
+    source: str,
+    destination: str,
     *,
     delete: bool,
     skip: bool,
@@ -914,13 +909,23 @@ def _run_so_sync_upload(
     workers: int,
 ) -> dict[str, Any]:
     show_progress = _show_transfer_progress(output)
-    dest = _format_so_uri(bucket_name, prefix)
+    source_is_so = _is_so_uri(source)
+    dest_is_so = _is_so_uri(destination)
+
+    if source_is_so and dest_is_so:
+        label = f"sync {source} → {destination}"
+        action: Literal["upload", "download", "copy"] = "copy"
+    elif source_is_so:
+        label = f"sync ← {source}"
+        action = "download"
+    else:
+        label = f"sync → {destination}"
+        action = "upload"
 
     def sync_call(**kwargs: Any) -> dict[str, int]:
-        return client.so.sync_local_to_bucket(
-            local_path,
-            bucket_name,
-            prefix=prefix,
+        return client.so.sync(
+            source,
+            destination,
             delete=delete,
             skip=skip,
             max_workers=workers,
@@ -928,41 +933,8 @@ def _run_so_sync_upload(
         )
 
     return _run_so_sync_transfer(
-        label=f"sync → {dest}",
-        action="upload",
-        show_progress=show_progress,
-        sync_call=sync_call,
-    )
-
-
-def _run_so_sync_download(
-    client: HomeCloudClient,
-    bucket_name: str,
-    prefix: str,
-    local_path: Path,
-    *,
-    delete: bool,
-    skip: bool,
-    output: str,
-    workers: int,
-) -> dict[str, Any]:
-    show_progress = _show_transfer_progress(output)
-    source = _format_so_uri(bucket_name, prefix)
-
-    def sync_call(**kwargs: Any) -> dict[str, int]:
-        return client.so.sync_bucket_to_local(
-            bucket_name,
-            local_path,
-            prefix=prefix,
-            delete=delete,
-            skip=skip,
-            max_workers=workers,
-            **kwargs,
-        )
-
-    return _run_so_sync_transfer(
-        label=f"sync ← {source}",
-        action="download",
+        label=label,
+        action=action,
         show_progress=show_progress,
         sync_call=sync_call,
     )
@@ -970,8 +942,14 @@ def _run_so_sync_download(
 
 @so_app.command("sync")
 def so_sync(
-    source: Annotated[str, typer.Argument(help="Local dir (upload) or so://bucket/ (download)")],
-    destination: Annotated[str, typer.Argument(help="so://bucket/ (upload) or local dir (download)")],
+    source: Annotated[
+        str,
+        typer.Argument(help="Local dir or so://bucket/prefix"),
+    ],
+    destination: Annotated[
+        str,
+        typer.Argument(help="Local dir or so://bucket/prefix"),
+    ],
     delete: Annotated[
         bool,
         typer.Option(
@@ -999,51 +977,33 @@ def so_sync(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format (json suppresses live progress)")] = "table",
 ) -> None:
-    """Sync local ↔ bucket. Overwrites by default. Upload: ./dir so://b/  Download: so://b/ ./dir"""
+    """Sync source → destination. Local↔bucket or bucket↔bucket (so:// → so://)."""
     source_is_so = _is_so_uri(source)
     dest_is_so = _is_so_uri(destination)
 
-    if source_is_so and dest_is_so:
-        raise typer.BadParameter(
-            "Cannot sync remote to remote. Use: homecloud so sync ./local so://bucket/ "
-            "or: homecloud so sync so://bucket/ ./local"
-        )
     if not source_is_so and not dest_is_so:
         raise typer.BadParameter(
-            "One argument must be a so:// URI. Upload: homecloud so sync ./local so://bucket/ "
-            "Download: homecloud so sync so://bucket/ ./local"
+            "One or both arguments must be a so:// URI. "
+            "Upload: homecloud so sync ./local so://bucket/ "
+            "Download: homecloud so sync so://bucket/ ./local "
+            "Remote: homecloud so sync so://src/ so://dest/"
         )
+    if not source_is_so:
+        local_path = Path(source)
+        if not local_path.is_dir():
+            raise typer.BadParameter(f"Not a directory: {local_path}")
 
     client = _client(profile)
     try:
-        if source_is_so:
-            bucket_name, prefix = _parse_so_uri(source)
-            local_path = Path(destination)
-            result = _run_so_sync_download(
-                client,
-                bucket_name,
-                prefix,
-                local_path,
-                delete=delete,
-                skip=skip,
-                output=output,
-                workers=workers,
-            )
-        else:
-            local_path = Path(source)
-            if not local_path.is_dir():
-                raise typer.BadParameter(f"Not a directory: {local_path}")
-            bucket_name, prefix = _parse_so_uri(destination)
-            result = _run_so_sync_upload(
-                client,
-                local_path,
-                bucket_name,
-                prefix,
-                delete=delete,
-                skip=skip,
-                output=output,
-                workers=workers,
-            )
+        result = _run_so_sync(
+            client,
+            source,
+            destination,
+            delete=delete,
+            skip=skip,
+            output=output,
+            workers=workers,
+        )
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(result, output_format=_output_option(output))
@@ -1432,22 +1392,116 @@ def fn_watch(
         _handle_error(exc)
 
 
+def _normalize_registry_host(host: str) -> str:
+    h = (host or "").strip()
+    for prefix in ("https://", "http://"):
+        if h.startswith(prefix):
+            h = h[len(prefix) :]
+    return h.rstrip("/")
+
+
+def _ir_registry_host(client: HomeCloudClient, override: str | None = None) -> str:
+    if override:
+        return _normalize_registry_host(override)
+    host: str | None = None
+    if client._ctx.has_console_session:
+        try:
+            data = client.ir.list()
+            raw = data.get("registry_host")
+            if isinstance(raw, str) and raw.strip():
+                host = raw
+        except HomeCloudError:
+            pass
+    if not host:
+        apex = (client._ctx.profile.apex or "holab.abrdns.com").strip().rstrip("/")
+        host = f"ir.{apex}"
+    return _normalize_registry_host(host)
+
+
+@ir_app.command("get-login-password")
+def ir_get_login_password(
+    profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+) -> None:
+    """Print Access Key secret for ``docker login --password-stdin`` (AWS ECR-style)."""
+    client = _client(profile)
+    try:
+        client._ctx.require_access_key()
+    except HomeCloudError as exc:
+        _handle_error(exc)
+    secret = client._ctx.profile.secret_access_key or ""
+    # stdout only — suitable for piping; no trailing status text
+    typer.echo(secret)
+
+
 @ir_app.command("login")
 def ir_login(
     profile: Annotated[Optional[str], typer.Option("--profile", "-p")] = None,
+    registry: Annotated[
+        Optional[str],
+        typer.Option("--registry", help="Registry host override (default: ir.{apex})"),
+    ] = None,
+    print_only: Annotated[
+        bool,
+        typer.Option(
+            "--print-only",
+            help="Print pipe instructions only; do not run docker login",
+        ),
+    ] = False,
 ) -> None:
-    """Print docker login instructions for Image Registry (IR)."""
+    """Log Docker into Image Registry (IR) using the configured Access Key profile."""
     client = _client(profile)
-    host = "ir.holab.abrdns.com"
     try:
-        data = client.ir.list()
-        host = data.get("registry_host") or host
-    except HomeCloudError:
-        pass
-    typer.echo(f"docker login {host}")
-    typer.echo("Username: <Access Key id>")
-    typer.echo("Password: <Access Key secret>")
-    typer.echo(f"Push example: docker push {host}/{{account_short_id}}/{{repo}}:tag")
+        client._ctx.require_access_key()
+    except HomeCloudError as exc:
+        _handle_error(exc)
+    access_key_id = client._ctx.profile.access_key_id or ""
+    secret = client._ctx.profile.secret_access_key or ""
+    host = _ir_registry_host(client, registry)
+
+    pipe_cmd = (
+        f"homecloud ir get-login-password | docker login --username {access_key_id} "
+        f"--password-stdin {host}"
+    )
+    if print_only:
+        typer.echo(pipe_cmd)
+        typer.echo(f"# Username is Access Key id; password from profile ({client._ctx.profile_name})")
+        typer.echo(f"# Push: docker push {host}/{{account_short_id}}/{{repo}}:tag")
+        return
+
+    docker_bin = shutil.which("docker")
+    if not docker_bin:
+        typer.echo("docker not found on PATH. Install Docker Desktop / CLI, or run:", err=True)
+        typer.echo(f"  {pipe_cmd}", err=True)
+        raise SystemExit(1)
+
+    try:
+        proc = subprocess.run(
+            [
+                docker_bin,
+                "login",
+                host,
+                "--username",
+                access_key_id,
+                "--password-stdin",
+            ],
+            input=secret,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        typer.echo(f"Failed to run docker login: {exc}", err=True)
+        typer.echo(f"  {pipe_cmd}", err=True)
+        raise SystemExit(1) from exc
+
+    if proc.stdout.strip():
+        typer.echo(proc.stdout.strip())
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "docker login failed").strip()
+        typer.echo(err, err=True)
+        raise SystemExit(proc.returncode or 1)
+    if not (proc.stdout or "").strip():
+        typer.echo(f"Login Succeeded ({host})")
 
 
 @ir_app.command("repo")

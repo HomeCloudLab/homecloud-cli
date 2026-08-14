@@ -20,7 +20,7 @@ from rich.progress import (
 
 from homecloud_core.transfer_state import TransferState
 
-TransferAction = Literal["upload", "download"]
+TransferAction = Literal["upload", "download", "copy"]
 REFRESH_INTERVAL_S = 0.1  # 10 Hz
 
 
@@ -92,7 +92,7 @@ class TransferProgress:
 
     def file_begin(self, key: str) -> None:
         self.state.file_begin(key)
-        color = "green" if self.action == "upload" else "cyan"
+        color = {"upload": "green", "download": "cyan", "copy": "magenta"}.get(self.action, "cyan")
         verb = self.action
         with self._log_lock:
             self.console.print(f"[{color}]{verb}[/]  {key}")

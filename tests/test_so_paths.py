@@ -1,5 +1,8 @@
 from homecloud_core.so_paths import (
     encode_object_key_path,
+    format_so_uri,
+    is_so_uri,
+    parse_so_uri,
     so_object_paths,
     sync_relative_local_path,
 )
@@ -32,3 +35,10 @@ def test_sync_relative_local_path_directory_prefix() -> None:
 def test_sync_relative_local_path_exact_file() -> None:
     key = "watch/spider noir/1/file.mkv"
     assert sync_relative_local_path(key, key) == "file.mkv"
+
+
+def test_is_so_uri_and_parse() -> None:
+    assert is_so_uri("so://docs/")
+    assert parse_so_uri("so://docs/photos/") == ("docs", "photos")
+    assert format_so_uri("docs", "a") == "so://docs/a"
+

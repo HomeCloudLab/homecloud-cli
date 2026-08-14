@@ -1316,3 +1316,120 @@ def test_handle_error_prints_message_only(capsys: pytest.CaptureFixture[str]) ->
     assert "Bucket not found" in captured.err
     assert "Traceback" not in captured.err
     assert "Traceback" not in captured.out
+
+
+def test_ir_get_login_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "access_key_id": "HCAKTEST",
+                        "secret_access_key": "super-secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.delenv("HOMECLOUD_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("HOMECLOUD_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("HC_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("HC_SECRET_ACCESS_KEY", raising=False)
+
+    result = runner.invoke(app, ["ir", "get-login-password"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "super-secret"
+
+
+def test_ir_login_runs_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    from homecloud_cli import cli as cli_mod
+
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "access_key_id": "HCAKTEST",
+                        "secret_access_key": "super-secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.delenv("HOMECLOUD_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("HOMECLOUD_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("HC_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("HC_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.setattr(cli_mod.shutil, "which", lambda _name: "/usr/bin/docker")
+
+    calls: list[dict[str, object]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> object:
+        calls.append({"cmd": cmd, "input": kwargs.get("input")})
+
+        class _Proc:
+            returncode = 0
+            stdout = "Login Succeeded\n"
+            stderr = ""
+
+        return _Proc()
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+
+    result = runner.invoke(app, ["ir", "login"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert calls
+    assert calls[0]["cmd"] == [
+        "/usr/bin/docker",
+        "login",
+        "ir.holab.abrdns.com",
+        "--username",
+        "HCAKTEST",
+        "--password-stdin",
+    ]
+    assert calls[0]["input"] == "super-secret"
+    assert "Login Succeeded" in result.stdout
+
+
+def test_ir_login_print_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "access_key_id": "HCAKTEST",
+                        "secret_access_key": "super-secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.delenv("HOMECLOUD_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("HOMECLOUD_SECRET_ACCESS_KEY", raising=False)
+
+    result = runner.invoke(app, ["ir", "login", "--print-only"])
+    assert result.exit_code == 0
+    assert "get-login-password" in result.stdout
+    assert "HCAKTEST" in result.stdout
+    assert "ir.holab.abrdns.com" in result.stdout
