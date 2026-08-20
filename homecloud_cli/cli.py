@@ -601,6 +601,7 @@ def queues_list(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "table",
 ) -> None:
+    """List queues (Access Key SigV1 preferred; falls back to console JWT)."""
     try:
         items = _client(profile).queues.list(live=live)
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
