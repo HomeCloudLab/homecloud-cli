@@ -74,7 +74,23 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
+      # Immutable GitHub Releases cannot replace assets. Skip if this tag
+      # already published files (e.g. re-run after MinIO-only failure).
+      - name: Check existing GitHub Release assets
+        id: ghrel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets | length' 2>/dev/null | grep -vq '^0$'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "GitHub Release $GITHUB_REF_NAME already has assets; skipping upload."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
+        if: steps.ghrel.outputs.skip != 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**
