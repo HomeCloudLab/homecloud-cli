@@ -44,6 +44,7 @@ ir_app = typer.Typer(help="Image Registry (IR) commands")
 billing_app = typer.Typer(help="Billing commands")
 usage_app = typer.Typer(help="Usage meter commands")
 monitoring_app = typer.Typer(help="Monitoring commands")
+domains_app = typer.Typer(help="Domains and hosted DNS commands")
 
 app.add_typer(configure_app, name="configure")
 app.add_typer(config_app, name="config")
@@ -58,6 +59,7 @@ app.add_typer(ir_app, name="ir")
 app.add_typer(usage_app, name="usage")
 app.add_typer(billing_app, name="billing")
 app.add_typer(monitoring_app, name="monitoring")
+app.add_typer(domains_app, name="domains")
 
 
 def _profile_option(profile: Optional[str]) -> str | None:
@@ -1682,6 +1684,135 @@ def monitoring_dashboards(
     try:
         items = _client(profile).monitoring.dashboards()
         emit(items, output_format=_output_option(output), columns=["id", "title", "metric"])
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("list")
+def domains_list(
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="table|json|yaml")] = "table",
+) -> None:
+    """List custom domains."""
+    try:
+        items = _client(profile).domains.list()
+        emit(
+            items,
+            output_format=_output_option(output),
+            columns=["name", "fqdn", "dns_mode", "status", "verified"],
+        )
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("create")
+def domains_create(
+    hostname: Annotated[str, typer.Argument(help="FQDN to add")],
+    dns_mode: Annotated[str, typer.Option("--dns-mode", help="external or homecloud")] = "external",
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Create a domain (External DNS or HomeCloud hosted zone)."""
+    try:
+        result = _client(profile).domains.create(hostname, dns_mode=dns_mode)
+        emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("get")
+def domains_get(
+    ref: Annotated[str, typer.Argument(help="Domain id or hostname")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Show a domain."""
+    try:
+        emit(_client(profile).domains.get(ref), output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("verify")
+def domains_verify(
+    domain_id: Annotated[str, typer.Argument(help="Domain id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Verify TXT or nameserver delegation."""
+    try:
+        emit(_client(profile).domains.verify(domain_id), output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("delete")
+def domains_delete(
+    ref: Annotated[str, typer.Argument(help="Domain id or hostname")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    """Delete a domain (detach services first)."""
+    try:
+        _client(profile).domains.delete(ref)
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("records")
+def domains_records(
+    domain_id: Annotated[str, typer.Argument(help="Domain id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "table",
+) -> None:
+    """List DNS records on a HomeCloud hosted zone."""
+    try:
+        items = _client(profile).domains.list_records(domain_id)
+        emit(items, output_format=_output_option(output), columns=["host", "type", "record", "ttl"])
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("record-create")
+def domains_record_create(
+    domain_id: Annotated[str, typer.Argument(help="Domain id")],
+    record_type: Annotated[str, typer.Option("--type", help="A, AAAA, CNAME, TXT, MX, CAA, SRV")],
+    record: Annotated[str, typer.Option("--record", help="Rdata")],
+    host: Annotated[str, typer.Option("--host", help="Relative host (empty = apex)")] = "",
+    ttl: Annotated[int, typer.Option("--ttl")] = 300,
+    priority: Annotated[Optional[int], typer.Option("--priority")] = None,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Create a DNS record on a hosted zone."""
+    try:
+        result = _client(profile).domains.create_record(
+            domain_id,
+            record_type=record_type,
+            record=record,
+            host=host,
+            ttl=ttl,
+            priority=priority,
+        )
+        emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("attach")
+def domains_attach(
+    domain_id: Annotated[str, typer.Argument(help="Domain id")],
+    target_id: Annotated[str, typer.Option("--target-id", help="Application, function, or bucket id")],
+    target_type: Annotated[str, typer.Option("--target-type")] = "application",
+    host: Annotated[str, typer.Option("--host", help="Relative host in a hosted zone")] = "",
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Attach a hostname to a service."""
+    try:
+        result = _client(profile).domains.attach(
+            domain_id, target_id=target_id, target_type=target_type, host=host
+        )
+        emit(result, output_format=_output_option(output))
     except HomeCloudError as exc:
         _handle_error(exc)
 

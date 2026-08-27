@@ -23,14 +23,138 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-def test_cli_version(runner: CliRunner) -> None:
-    result = runner.invoke(app, ["--version"])
+def test_cli_domains_help(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["domains", "--help"])
     assert result.exit_code == 0
-    assert __version__ in result.stdout
+    assert "list" in result.stdout
+    assert "record-create" in result.stdout
+    assert "attach" in result.stdout
 
-    result = runner.invoke(app, ["version"])
-    assert result.exit_code == 0
-    assert f"homecloud {__version__}" in result.stdout
+
+def test_cli_domains_create_and_attach(monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeDomains:
+        def create(self, hostname: str, *, dns_mode: str = "external") -> dict[str, object]:
+            calls.append(("create", {"hostname": hostname, "dns_mode": dns_mode}))
+            return {"id": "d1", "fqdn": hostname, "dns_mode": dns_mode}
+
+        def create_record(
+            self,
+            domain_id: str,
+            *,
+            record_type: str,
+            record: str,
+            host: str = "",
+            ttl: int = 300,
+            priority: int | None = None,
+        ) -> dict[str, object]:
+            calls.append(
+                (
+                    "create_record",
+                    {
+                        "domain_id": domain_id,
+                        "type": record_type,
+                        "record": record,
+                        "host": host,
+                        "ttl": ttl,
+                        "priority": priority,
+                    },
+                )
+            )
+            return {"id": "rec1", "type": record_type, "host": host}
+
+        def attach(
+            self,
+            domain_id: str,
+            *,
+            target_id: str,
+            target_type: str = "application",
+            host: str = "",
+        ) -> dict[str, object]:
+            calls.append(
+                (
+                    "attach",
+                    {
+                        "domain_id": domain_id,
+                        "target_id": target_id,
+                        "target_type": target_type,
+                        "host": host,
+                    },
+                )
+            )
+            return {"id": "a1", "fqdn": "www.example.com", "host": host}
+
+    class FakeClient:
+        domains = FakeDomains()
+
+    monkeypatch.setattr("homecloud_cli.cli._client", lambda *args, **kwargs: FakeClient())
+
+    created = runner.invoke(
+        app,
+        ["domains", "create", "example.com", "--dns-mode", "homecloud", "--output", "json"],
+    )
+    assert created.exit_code == 0, created.stdout
+    assert '"dns_mode": "homecloud"' in created.stdout
+
+    record = runner.invoke(
+        app,
+        [
+            "domains",
+            "record-create",
+            "d1",
+            "--type",
+            "A",
+            "--record",
+            "1.2.3.4",
+            "--host",
+            "www",
+            "--output",
+            "json",
+        ],
+    )
+    assert record.exit_code == 0, record.stdout
+
+    attached = runner.invoke(
+        app,
+        [
+            "domains",
+            "attach",
+            "d1",
+            "--target-id",
+            "fn-1",
+            "--target-type",
+            "function",
+            "--host",
+            "www",
+            "--output",
+            "json",
+        ],
+    )
+    assert attached.exit_code == 0, attached.stdout
+    assert calls == [
+        ("create", {"hostname": "example.com", "dns_mode": "homecloud"}),
+        (
+            "create_record",
+            {
+                "domain_id": "d1",
+                "type": "A",
+                "record": "1.2.3.4",
+                "host": "www",
+                "ttl": 300,
+                "priority": None,
+            },
+        ),
+        (
+            "attach",
+            {
+                "domain_id": "d1",
+                "target_id": "fn-1",
+                "target_type": "function",
+                "host": "www",
+            },
+        ),
+    ]
 
 
 def test_cli_no_args_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
