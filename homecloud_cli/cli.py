@@ -1803,7 +1803,7 @@ def domains_attach(
     domain_id: Annotated[str, typer.Argument(help="Domain id")],
     target_id: Annotated[str, typer.Option("--target-id", help="Application, function, or bucket id")],
     target_type: Annotated[str, typer.Option("--target-type")] = "application",
-    host: Annotated[str, typer.Option("--host", help="Relative host in a hosted zone")] = "",
+    host: Annotated[str, typer.Option("--host", help="Relative host (empty = apex)")] = "",
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option("--output", "-o")] = "json",
 ) -> None:
