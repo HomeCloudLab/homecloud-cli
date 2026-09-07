@@ -1287,12 +1287,44 @@ def fn_logs(
         Optional[str],
         typer.Option("--id", help="Invocation id — print full detail + logs"),
     ] = None,
+    follow: Annotated[
+        bool,
+        typer.Option("--follow", "-f", help="Stream live logs via SSE for --id"),
+    ] = False,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", help="SSE follow timeout seconds"),
+    ] = 120.0,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option("--output", "-o")] = "table",
 ) -> None:
-    """List recent invocations, or show one invocation's logs (console JWT)."""
+    """List recent invocations, show one invocation's logs, or --follow live SSE."""
     try:
         client = _client(profile)
+        if invocation_id and follow:
+            console = Console()
+            for event in client.functions.stream_logs(
+                name, invocation_id, timeout_seconds=timeout
+            ):
+                typ = str(event.get("type") or "")
+                if typ == "status":
+                    console.print(f"[dim]status[/dim] {event.get('status')}")
+                elif typ == "log":
+                    console.print(str(event.get("line") or ""))
+                elif typ == "logs":
+                    text_logs = str(event.get("logs") or "")
+                    if text_logs.strip():
+                        console.print(text_logs)
+                elif typ == "error":
+                    console.print(f"[red]{event.get('message') or event}[/red]")
+                elif typ in {"end", "done"}:
+                    st = event.get("status")
+                    console.print(f"[green]✓[/green] {st or 'done'}")
+                    return
+                elif typ == "timeout":
+                    console.print("[yellow]stream timeout[/yellow]")
+                    raise SystemExit(1)
+            return
         if invocation_id:
             detail = client.functions.get_invocation(name, invocation_id)
             if output == "table":
@@ -1327,23 +1359,24 @@ def fn_watch(
         typer.Option(
             "--wait",
             "-w",
-            help="Seconds to wait for a new completed invocation before exit (0 = forever)",
+            help="Seconds to wait for a new invocation before exit (0 = forever)",
         ),
     ] = 120,
     poll: Annotated[
         float,
-        typer.Option("--poll", help="Seconds between polls"),
+        typer.Option("--poll", help="Seconds between polls for a new invocation id"),
     ] = 2.0,
     since_id: Annotated[
         Optional[str],
         typer.Option("--since-id", help="Only report invocations newer than this id"),
     ] = None,
+    follow_timeout: Annotated[
+        float,
+        typer.Option("--follow-timeout", help="SSE timeout once an invocation id is known"),
+    ] = 120.0,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
 ) -> None:
-    """Wait for the next function invocation and print its logs when it finishes.
-
-    Logs are available after the run completes (not streamed mid-execution).
-    """
+    """Wait for the next function invocation and stream its logs live (SSE)."""
     import time
 
     try:
@@ -1352,7 +1385,6 @@ def fn_watch(
         items = client.functions.logs(name)
         known = {str(i.get("id")) for i in items}
         if since_id:
-            # Treat listed ids up to since_id as already seen; keep all current as known.
             known.add(str(since_id))
         deadline = None if wait <= 0 else time.monotonic() + wait
         console.print(
@@ -1371,25 +1403,29 @@ def fn_watch(
                 iid = str(item.get("id") or "")
                 if not iid or iid in known:
                     continue
-                status = str(item.get("status") or "")
-                if status in {"running", "pending"}:
-                    console.print(f"  … invocation {iid} status={status}")
-                    continue
                 known.add(iid)
-                console.print(
-                    f"[green]New invocation[/green] {iid}  "
-                    f"status={status}  trigger={item.get('trigger_type')}  "
-                    f"duration={item.get('duration_ms')}ms"
-                )
-                try:
-                    detail = client.functions.get_invocation(name, iid)
-                except HomeCloudError as exc:
-                    console.print(f"[red]Failed to load detail: {exc}[/red]")
-                    raise SystemExit(1)
-                if detail.get("error_message"):
-                    console.print(f"[red]{detail['error_message']}[/red]")
-                logs = detail.get("logs") or ""
-                console.print(logs if str(logs).strip() else "(no logs)")
+                status = str(item.get("status") or "")
+                console.print(f"[bold]invocation[/bold] {iid}  status={status}")
+                for event in client.functions.stream_logs(
+                    name, iid, timeout_seconds=follow_timeout
+                ):
+                    typ = str(event.get("type") or "")
+                    if typ == "status":
+                        console.print(f"[dim]status[/dim] {event.get('status')}")
+                    elif typ == "log":
+                        console.print(str(event.get("line") or ""))
+                    elif typ == "logs":
+                        text_logs = str(event.get("logs") or "")
+                        if text_logs.strip():
+                            console.print(text_logs)
+                    elif typ == "error":
+                        console.print(f"[red]{event.get('message') or event}[/red]")
+                    elif typ in {"end", "done"}:
+                        console.print(f"[green]✓[/green] {event.get('status') or 'done'}")
+                        break
+                    elif typ == "timeout":
+                        console.print("[yellow]stream timeout[/yellow]")
+                        break
                 return
     except HomeCloudError as exc:
         _handle_error(exc)
