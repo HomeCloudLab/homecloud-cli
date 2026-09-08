@@ -1295,6 +1295,22 @@ def fn_logs(
         float,
         typer.Option("--timeout", help="SSE follow timeout seconds"),
     ] = 120.0,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Page size when listing invocations (1–100)"),
+    ] = 50,
+    cursor: Annotated[
+        Optional[str],
+        typer.Option("--cursor", help="Opaque cursor from a previous list page"),
+    ] = None,
+    status_filter: Annotated[
+        Optional[str],
+        typer.Option("--status", help="Filter by invocation status"),
+    ] = None,
+    trigger: Annotated[
+        Optional[str],
+        typer.Option("--trigger", help="Filter by trigger_type"),
+    ] = None,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option("--output", "-o")] = "table",
 ) -> None:
@@ -1341,12 +1357,21 @@ def fn_logs(
                 return
             emit(detail, output_format=_output_option(output))
             return
-        items = client.functions.logs(name)
+        page = client.functions.logs(
+            name,
+            limit=limit,
+            cursor=cursor,
+            status=status_filter,
+            trigger=trigger,
+        )
+        items = page.get("items", []) if isinstance(page, dict) else page
         emit(
             items,
             output_format=_output_option(output),
             columns=["id", "status", "trigger_type", "duration_ms", "created_at"],
         )
+        if isinstance(page, dict) and page.get("next_cursor") and output == "table":
+            Console().print(f"[dim]next_cursor={page['next_cursor']}[/dim]")
     except HomeCloudError as exc:
         _handle_error(exc)
 
@@ -1382,7 +1407,8 @@ def fn_watch(
     try:
         client = _client(profile)
         console = Console()
-        items = client.functions.logs(name)
+        page = client.functions.logs(name, limit=50)
+        items = page.get("items", []) if isinstance(page, dict) else page
         known = {str(i.get("id")) for i in items}
         if since_id:
             known.add(str(since_id))
@@ -1398,7 +1424,12 @@ def fn_watch(
                 )
                 raise SystemExit(1)
             time.sleep(max(0.5, poll))
-            latest = client.functions.logs(name)
+            latest_page = client.functions.logs(name, limit=50)
+            latest = (
+                latest_page.get("items", [])
+                if isinstance(latest_page, dict)
+                else latest_page
+            )
             for item in latest:
                 iid = str(item.get("id") or "")
                 if not iid or iid in known:
