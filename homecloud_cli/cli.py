@@ -1834,7 +1834,7 @@ def domains_records(
     """List DNS records on a HomeCloud hosted zone."""
     try:
         items = _client(profile).domains.list_records(domain_id)
-        emit(items, output_format=_output_option(output), columns=["host", "type", "record", "ttl"])
+        emit(items, output_format=_output_option(output), columns=["host", "type", "record", "ttl", "origin", "mode"])
     except HomeCloudError as exc:
         _handle_error(exc)
 
@@ -1847,6 +1847,7 @@ def domains_record_create(
     host: Annotated[str, typer.Option("--host", help="Relative host (empty = apex)")] = "",
     ttl: Annotated[int, typer.Option("--ttl")] = 300,
     priority: Annotated[Optional[int], typer.Option("--priority")] = None,
+    mode: Annotated[Optional[str], typer.Option("--mode", help="static or dynamic (A/AAAA)")] = None,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option("--output", "-o")] = "json",
 ) -> None:
@@ -1859,8 +1860,50 @@ def domains_record_create(
             host=host,
             ttl=ttl,
             priority=priority,
+            mode=mode,
         )
         emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("record-update")
+def domains_record_update(
+    domain_id: Annotated[str, typer.Argument(help="Domain id")],
+    record_id: Annotated[str, typer.Argument(help="Record id")],
+    record_type: Annotated[str, typer.Option("--type", help="A, AAAA, CNAME, TXT, MX, CAA, SRV")],
+    record: Annotated[str, typer.Option("--record", help="Rdata")],
+    host: Annotated[str, typer.Option("--host", help="Relative host (empty = apex)")] = "",
+    ttl: Annotated[int, typer.Option("--ttl")] = 300,
+    priority: Annotated[Optional[int], typer.Option("--priority")] = None,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Update a user-origin DNS record on a hosted zone."""
+    try:
+        result = _client(profile).domains.update_record(
+            domain_id,
+            record_id,
+            record_type=record_type,
+            record=record,
+            host=host,
+            ttl=ttl,
+            priority=priority,
+        )
+        emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("record-delete")
+def domains_record_delete(
+    domain_id: Annotated[str, typer.Argument(help="Domain id")],
+    record_id: Annotated[str, typer.Argument(help="Record id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    """Delete a user-origin DNS record on a hosted zone."""
+    try:
+        _client(profile).domains.delete_record(domain_id, record_id)
     except HomeCloudError as exc:
         _handle_error(exc)
 
@@ -1880,6 +1923,18 @@ def domains_attach(
             domain_id, target_id=target_id, target_type=target_type, host=host
         )
         emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@domains_app.command("detach")
+def domains_detach(
+    attachment_id: Annotated[str, typer.Argument(help="Attachment id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    """Detach a hostname from a service."""
+    try:
+        _client(profile).domains.detach(attachment_id)
     except HomeCloudError as exc:
         _handle_error(exc)
 

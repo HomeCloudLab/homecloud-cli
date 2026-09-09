@@ -28,7 +28,10 @@ def test_cli_domains_help(runner: CliRunner) -> None:
     assert result.exit_code == 0
     assert "list" in result.stdout
     assert "record-create" in result.stdout
+    assert "record-update" in result.stdout
+    assert "record-delete" in result.stdout
     assert "attach" in result.stdout
+    assert "detach" in result.stdout
 
 
 def test_cli_domains_create_and_attach(monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
@@ -48,6 +51,7 @@ def test_cli_domains_create_and_attach(monkeypatch: pytest.MonkeyPatch, runner: 
             host: str = "",
             ttl: int = 300,
             priority: int | None = None,
+            mode: str | None = None,
         ) -> dict[str, object]:
             calls.append(
                 (
