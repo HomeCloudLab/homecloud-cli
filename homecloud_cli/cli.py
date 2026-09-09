@@ -198,10 +198,27 @@ _MANAGED_EXCEPTIONS = (
 # subclasses of the separately-installed ``click`` package, so isinstance
 # checks must cover both (standalone builds use Typer's Click).
 _TyperClick = typer._click
-_CLICK_EXIT = (typer.Exit, click.exceptions.Exit, _TyperClick.exceptions.Exit)
-_CLICK_EXCEPTION = (click.ClickException, _TyperClick.ClickException)
-_CLICK_ABORT = (click.Abort, _TyperClick.exceptions.Abort)
-_NO_ARGS_IS_HELP = getattr(_TyperClick.exceptions, "NoArgsIsHelpError", type(None))
+_typer_exc = getattr(_TyperClick, "exceptions", None)
+_CLICK_EXIT = tuple(
+    t
+    for t in (
+        typer.Exit,
+        getattr(click.exceptions, "Exit", None),
+        getattr(_typer_exc, "Exit", None),
+    )
+    if t is not None
+)
+_CLICK_EXCEPTION = tuple(
+    t
+    for t in (click.ClickException, getattr(_TyperClick, "ClickException", None))
+    if t is not None
+)
+_CLICK_ABORT = tuple(
+    t
+    for t in (click.Abort, getattr(_typer_exc, "Abort", None))
+    if t is not None
+)
+_NO_ARGS_IS_HELP = getattr(_typer_exc, "NoArgsIsHelpError", type(None))
 
 
 def _exit_with_error(exc: BaseException) -> None:
