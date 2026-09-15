@@ -1,0 +1,12 @@
+---
+description: Never git push unless the user explicitly asks
+alwaysApply: true
+---
+
+# Ship policy (push only when asked)
+
+**Do not `git push`** unless the user explicitly asks in that message.
+
+Pushing a user-facing release is incomplete without a **version bump + `v*` git tag** — follow `sdk-cli-release-tags.mdc`.
+
+If unclear: **commit only**, ask before any push.

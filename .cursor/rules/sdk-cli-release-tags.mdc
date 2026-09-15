@@ -1,0 +1,35 @@
+---
+description: Shipping this CLI requires a version bump and git tag (release CI is tag-triggered)
+alwaysApply: true
+---
+
+# CLI release = version bump + git tag
+
+Publishing **homecloud-cli** (standalone binaries to `homecloud-cli` bucket) is driven by **git tags** `v*`, not by a push to `master`/`main` alone.
+
+## When the user asks to ship / push / release CLI changes
+
+Do **all** of the following in the same delivery (do not “push commits and tag later”):
+
+1. **Bump the package version** — `pyproject.toml`, `homecloud_cli/__init__.py`; bump `homecloud-sdk>=…` if the CLI needs new SDK APIs
+2. **Document the release** — add a row to sibling `homecloud-docs/docs/en/cli/releases.md` (and HE); note SDK version when this CLI depends on a new SDK
+3. **Commit** the version bump with the feature
+4. **`git push`** the branch (`master`)
+5. **Create and push an annotated tag** matching the bumped version, e.g. `v0.2.49`:
+   ```bash
+   git tag -a vX.Y.Z -m "vX.Y.Z — short reason"
+   git push origin vX.Y.Z
+   ```
+
+## Order
+
+- Ensure **homecloud-sdk** is pushed + tagged first when this release needs new SDK code (CLI release workflow checks out `homecloud-sdk`).
+- Docs (`releases.md`) can ship in the same `homecloud-docs` push as the feature.
+
+## Do not
+
+- Ship user-facing CLI features with only a branch push and no tag
+- Reuse an existing tag or force-move tags
+- Forget the version bump (tag alone with a stale `pyproject` / `__version__` is wrong)
+
+If the user asks to push CLI work and tagging is unclear: **assume a release is intended**, bump + tag, and state the tag name in the summary.

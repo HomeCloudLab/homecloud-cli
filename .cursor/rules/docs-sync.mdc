@@ -1,0 +1,38 @@
+---
+description: REQUIRED — update sibling homecloud-docs in the same task as user-facing CLI changes
+alwaysApply: true
+---
+
+# Documentation sync (homecloud-docs)
+
+**Mandatory:** when you add or change **user-facing** CLI behavior (commands, flags, URIs, auth), update the docs site in the **same task** — never defer.
+
+**Live site:** https://docs.web.holab.abrdns.com  
+**Docs repo:** sibling `homecloud-docs/` (MkDocs; auto-deploys on push to `main`)
+
+## This repo → docs
+
+| Change | Update docs under |
+|--------|-------------------|
+| Commands, flags, URIs, auth | `docs/en/cli/` (+ `docs/he/cli/` for key pages) |
+| Release / version tag | Row in `docs/en/cli/releases.md` (+ HE) |
+
+## Conventions
+
+- **SO** not "storage" — URIs: `so://bucket/key`
+- CLI examples: show PowerShell **and** bash when quoting/JSON differs
+- Code blocks, commands, JSON: always **LTR**
+
+## Workflow
+
+1. Implement here
+2. Edit `homecloud-docs/docs/en/cli/...` (and HE for key pages)
+3. Run `mkdocs build --strict` in `homecloud-docs/`
+4. Ship docs with the code when the user asks to push
+5. Mention the docs update in your summary
+
+## Do not
+
+- Ship CLI changes without updating docs
+- Say "docs can be updated later"
+- Use `s3://` in new docs (accept in CLI for compat only; docs use `so://`)
