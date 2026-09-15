@@ -111,7 +111,8 @@ jobs:
             exit 1
           fi
 
-          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc
+          # Community mc path on dl.min.io returns 410; AIStor client is the current binary.
+          curl -fsSL https://dl.min.io/aistor/mc/release/linux-amd64/mc -o mc
           chmod +x mc
           sudo mv mc /usr/local/bin/
 
