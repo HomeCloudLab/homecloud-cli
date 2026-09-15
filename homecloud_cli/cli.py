@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
@@ -16,6 +17,7 @@ import typer
 from homecloud_core.defaults import DEFAULT_PROFILE
 from homecloud_core.errors import HomeCloudError
 from homecloud_sdk import HomeCloudClient
+from homecloud_sdk.secret_formats import SecretFormatError, parse_secret_format, serialize_secret_format
 from homecloud_sdk.so_parallel import DEFAULT_SO_WORKERS
 from rich.console import Console
 
@@ -45,6 +47,9 @@ billing_app = typer.Typer(help="Billing commands")
 usage_app = typer.Typer(help="Usage meter commands")
 monitoring_app = typer.Typer(help="Monitoring commands")
 domains_app = typer.Typer(help="Domains and hosted DNS commands")
+secrets_app = typer.Typer(
+    help="Secrets value commands (flat key/value map; put replaces the entire secret)"
+)
 
 app.add_typer(configure_app, name="configure")
 app.add_typer(config_app, name="config")
@@ -60,6 +65,7 @@ app.add_typer(usage_app, name="usage")
 app.add_typer(billing_app, name="billing")
 app.add_typer(monitoring_app, name="monitoring")
 app.add_typer(domains_app, name="domains")
+app.add_typer(secrets_app, name="secrets")
 
 
 def _profile_option(profile: Optional[str]) -> str | None:
@@ -831,6 +837,74 @@ def mq_purge_dlq(
     except (FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     typer.echo("purged")
+
+
+def _secrets_format_option(value: str) -> Literal["json", "env", "yaml"]:
+    normalized = value.strip().lower()
+    if normalized not in {"json", "env", "yaml"}:
+        raise typer.BadParameter("format must be one of: json, env, yaml")
+    return normalized  # type: ignore[return-value]
+
+
+@secrets_app.command("get")
+def secrets_get(
+    name: Annotated[str, typer.Argument(help="Secret name")],
+    format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            "-f",
+            help="Value map format: json | env | yaml (flat string map only)",
+        ),
+    ] = "json",
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    """Fetch secret values (Access Key). Prints the flat key/value map."""
+    try:
+        fmt = _secrets_format_option(format)
+        result = _client(profile).secrets.get_value(name)
+        values = result.get("values") or {}
+        if not isinstance(values, dict):
+            raise HomeCloudError("unexpected secrets get response: missing values map")
+        text = serialize_secret_format(fmt, {str(k): str(v) for k, v in values.items()})
+        sys.stdout.write(text)
+    except SecretFormatError as exc:
+        _handle_error(HomeCloudError(str(exc)))
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+
+
+@secrets_app.command("put")
+def secrets_put(
+    name: Annotated[str, typer.Argument(help="Secret name")],
+    format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            "-f",
+            help="Input format: json | env | yaml (flat string map only)",
+        ),
+    ] = "json",
+    file: Annotated[
+        Optional[Path],
+        typer.Option("--file", help="Read values from file (default: stdin)", exists=True, readable=True),
+    ] = None,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format for put response metadata")] = "json",
+) -> None:
+    """Replace the entire secret value map (Access Key). Omitting keys removes them."""
+    try:
+        fmt = _secrets_format_option(format)
+        raw = file.read_text(encoding="utf-8") if file is not None else sys.stdin.read()
+        values = parse_secret_format(fmt, raw)
+        if not values:
+            raise HomeCloudError("secret put requires at least one key/value pair")
+        result = _client(profile).secrets.put_value(name, values)
+    except SecretFormatError as exc:
+        _handle_error(HomeCloudError(str(exc)))
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(result, output_format=_output_option(output))
 
 
 def _is_so_uri(target: str) -> bool:

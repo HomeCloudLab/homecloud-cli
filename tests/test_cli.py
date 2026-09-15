@@ -282,6 +282,122 @@ def test_mq_send_delegates_to_sdk(
     assert captured["path"] == "/acc-1/demo-queue/messages"
 
 
+def test_secrets_get_format_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "apex": "example.test",
+                        "default_account_id": "acc-1",
+                        "access_key_id": "HCAK1",
+                        "secret_access_key": "secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+
+    captured: dict[str, str] = {}
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method: str, url: str, **kwargs):
+            request = httpx.Request(method, url, headers=kwargs.get("headers"), json=kwargs.get("json"))
+            captured["method"] = request.method
+            captured["path"] = request.url.path
+            return httpx.Response(
+                200,
+                json={"name": "demo", "version": 1, "values": {"TOKEN": "abc", "URL": "x"}},
+            )
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    result = runner.invoke(app, ["secrets", "get", "demo", "--format", "env"])
+    assert result.exit_code == 0, result.stdout
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/acc-1/secrets/demo/value"
+    assert "TOKEN=abc" in result.stdout
+    assert "URL=x" in result.stdout
+
+
+def test_secrets_put_from_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "apex": "example.test",
+                        "default_account_id": "acc-1",
+                        "access_key_id": "HCAK1",
+                        "secret_access_key": "secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+
+    env_file = tmp_path / "demo.env"
+    env_file.write_text("TOKEN=abc\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method: str, url: str, **kwargs):
+            request = httpx.Request(method, url, headers=kwargs.get("headers"), json=kwargs.get("json"))
+            captured["method"] = request.method
+            captured["path"] = request.url.path
+            captured["json"] = kwargs.get("json")
+            return httpx.Response(200, json={"name": "demo", "version": 2})
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    result = runner.invoke(
+        app,
+        ["secrets", "put", "demo", "--format", "env", "--file", str(env_file), "--output", "json"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert captured["method"] == "PUT"
+    assert captured["path"] == "/acc-1/secrets/demo/value"
+    assert captured["json"] == {"values": {"TOKEN": "abc"}}
+
+
 def test_mq_send_batch_array(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
