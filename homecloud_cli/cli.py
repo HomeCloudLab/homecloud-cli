@@ -1552,7 +1552,7 @@ def ir_login(
     if print_only:
         typer.echo(pipe_cmd)
         typer.echo(f"# Username is Access Key id; password from profile ({client._ctx.profile_name})")
-        typer.echo(f"# Push: docker push {host}/{{account_short_id}}/{{repo}}:tag")
+        typer.echo(f"# Push: docker push {host}/{{account_number}}/{{repo}}:tag")
         return
 
     docker_bin = shutil.which("docker")
