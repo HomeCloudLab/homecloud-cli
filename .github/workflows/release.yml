@@ -23,7 +23,7 @@ jobs:
           - os: ubuntu-latest
             target: linux-amd64
             script: bash scripts/build-binary.sh
-          # darwin-amd64 (macos-13) disabled — GitHub Intel Mac runners queue indefinitely on free tier
+          # darwin-amd64 (macos-13) disabled ג€” GitHub Intel Mac runners queue indefinitely on free tier
           - os: macos-latest
             target: darwin-arm64
             script: bash scripts/build-binary.sh
@@ -111,8 +111,8 @@ jobs:
             exit 1
           fi
 
-          # Community mc path on dl.min.io returns 410; AIStor client is the current binary.
-          curl -fsSL https://dl.min.io/aistor/mc/release/linux-amd64/mc -o mc
+          # Community mc from GitHub (~30MB). AIStor latest is ~110MB.
+          curl -fsSL https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z -o mc
           chmod +x mc
           sudo mv mc /usr/local/bin/
 
