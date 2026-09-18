@@ -282,6 +282,140 @@ def test_mq_send_delegates_to_sdk(
     assert captured["path"] == "/acc-1/demo-queue/messages"
 
 
+def test_cli_secrets_create(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeSecrets:
+        def create(
+            self,
+            name: str,
+            values: dict[str, str] | str | None = None,
+            *,
+            description: str | None = None,
+            format: str | None = None,
+            **fields: str,
+        ) -> dict[str, object]:
+            calls.append(
+                (
+                    "create",
+                    {
+                        "name": name,
+                        "values": values,
+                        "description": description,
+                        "fields": fields,
+                    },
+                )
+            )
+            return {"name": name, "status": "active", "description": description}
+
+    class FakeClient:
+        secrets = FakeSecrets()
+
+    monkeypatch.setattr("homecloud_cli.cli._client", lambda *args, **kwargs: FakeClient())
+
+    empty = runner.invoke(app, ["secrets", "create", "demo", "--output", "json"])
+    assert empty.exit_code == 0, empty.stdout
+    assert calls[0][1]["name"] == "demo"
+    assert calls[0][1]["values"] is None
+
+    seeded = runner.invoke(
+        app,
+        ["secrets", "create", "demo", "API_KEY=test", "DB_HOST=db", "-d", "prod", "--output", "json"],
+    )
+    assert seeded.exit_code == 0, seeded.stdout
+    assert calls[1][1]["values"] == {"API_KEY": "test", "DB_HOST": "db"}
+    assert calls[1][1]["description"] == "prod"
+
+    env_file = tmp_path / "seed.env"
+    env_file.write_text("TOKEN=abc", encoding="utf-8")
+    from_file = runner.invoke(
+        app,
+        ["secrets", "create", "demo", "--format", "env", "--file", str(env_file), "--output", "json"],
+    )
+    assert from_file.exit_code == 0, from_file.stdout
+    assert calls[2][1]["values"] == {"TOKEN": "abc"}
+
+
+def test_secrets_get_keys_and_put_merge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cred_file = tmp_path / "credentials"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "default_profile": "default",
+                "profiles": {
+                    "default": {
+                        "apex": "example.test",
+                        "default_account_id": "acc-1",
+                        "access_key_id": "HCAK1",
+                        "secret_access_key": "secret",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMECLOUD_CREDENTIALS_FILE", str(cred_file))
+    monkeypatch.setenv("HOMECLOUD_CONFIG_DIR", str(tmp_path))
+
+    captured: dict = {}
+
+    class MockHttpClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def request(self, method, url, **kwargs):
+            import httpx
+
+            request = httpx.Request(method, url)
+            captured["method"] = method
+            captured["path"] = request.url.path
+            captured["params"] = kwargs.get("params")
+            captured["json"] = kwargs.get("json")
+            if method == "GET":
+                return httpx.Response(
+                    200,
+                    json={"name": "demo", "version": 2, "values": {"API_KEY": "x"}},
+                )
+            return httpx.Response(200, json={"name": "demo", "version": 3})
+
+    monkeypatch.setattr("homecloud_core.transport.httpx.Client", MockHttpClient)
+
+    get_result = runner.invoke(app, ["secrets", "get", "demo", "--key", "API_KEY", "--format", "env"])
+    assert get_result.exit_code == 0, get_result.stdout
+    assert captured["params"] == {"keys": ["API_KEY"]}
+    assert "API_KEY=x" in get_result.stdout
+
+    put_file = tmp_path / "patch.env"
+    put_file.write_text("API_KEY=rotated\n", encoding="utf-8")
+    put_result = runner.invoke(
+        app,
+        ["secrets", "put", "demo", "--merge", "--format", "env", "--file", str(put_file), "--output", "json"],
+    )
+    assert put_result.exit_code == 0, put_result.stdout
+    assert captured["json"]["mode"] == "merge"
+    assert captured["json"]["values"]["API_KEY"] == "rotated"
+
+    set_result = runner.invoke(app, ["secrets", "set", "demo", "DB_HOST=db", "--output", "json"])
+    assert set_result.exit_code == 0, set_result.stdout
+    assert captured["json"]["mode"] == "merge"
+    assert captured["json"]["values"]["DB_HOST"] == "db"
+
+
 def test_secrets_get_format_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -48,7 +48,7 @@ usage_app = typer.Typer(help="Usage meter commands")
 monitoring_app = typer.Typer(help="Monitoring commands")
 domains_app = typer.Typer(help="Domains and hosted DNS commands")
 secrets_app = typer.Typer(
-    help="Secrets value commands (flat key/value map; put replaces the entire secret)"
+    help="Secrets: create/list (Access Key SigV1) + get/put/set values (Access Key data plane)"
 )
 
 app.add_typer(configure_app, name="configure")
@@ -846,6 +846,75 @@ def _secrets_format_option(value: str) -> Literal["json", "env", "yaml"]:
     return normalized  # type: ignore[return-value]
 
 
+def _parse_secret_pairs(pairs: list[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for pair in pairs:
+        eq = pair.find("=")
+        if eq <= 0:
+            raise HomeCloudError(f"expected KEY=VALUE, got: {pair!r}")
+        key = pair[:eq].strip()
+        if not key:
+            raise HomeCloudError(f"empty key in: {pair!r}")
+        values[key] = pair[eq + 1 :]
+    return values
+
+
+@secrets_app.command("create")
+def secrets_create(
+    name: Annotated[str, typer.Argument(help="Secret name")],
+    pairs: Annotated[
+        Optional[list[str]],
+        typer.Argument(help="Optional initial KEY=VALUE pairs"),
+    ] = None,
+    description: Annotated[
+        Optional[str],
+        typer.Option("--description", "-d", help="Optional description"),
+    ] = None,
+    format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            "-f",
+            help="Input format when using --file: json | env | yaml",
+        ),
+    ] = "env",
+    file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--file",
+            help="Seed values from file",
+            exists=True,
+            readable=True,
+        ),
+    ] = None,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format for create response")] = "json",
+) -> None:
+    """Create a secret (Access Key). Optionally seed initial values."""
+    try:
+        values: dict[str, str] | None = None
+        if file is not None and pairs:
+            raise HomeCloudError("pass either KEY=VALUE pairs or --file, not both")
+        if file is not None:
+            fmt = _secrets_format_option(format)
+            raw = file.read_text(encoding="utf-8")
+            values = parse_secret_format(fmt, raw)
+            if not values:
+                raise HomeCloudError("secret create --file requires at least one key/value pair")
+        elif pairs:
+            values = _parse_secret_pairs(pairs)
+        result = _client(profile).secrets.create(
+            name,
+            values,
+            description=description,
+        )
+        emit(result, output_format=_output_option(output))
+    except SecretFormatError as exc:
+        _handle_error(HomeCloudError(str(exc)))
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+
+
 @secrets_app.command("get")
 def secrets_get(
     name: Annotated[str, typer.Argument(help="Secret name")],
@@ -857,12 +926,20 @@ def secrets_get(
             help="Value map format: json | env | yaml (flat string map only)",
         ),
     ] = "json",
+    key: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--key",
+            "-k",
+            help="Fetch only these keys (repeatable). Missing key → error.",
+        ),
+    ] = None,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
 ) -> None:
     """Fetch secret values (Access Key). Prints the flat key/value map."""
     try:
         fmt = _secrets_format_option(format)
-        result = _client(profile).secrets.get_value(name)
+        result = _client(profile).secrets.get_value(name, *(key or ()))
         values = result.get("values") or {}
         if not isinstance(values, dict):
             raise HomeCloudError("unexpected secrets get response: missing values map")
@@ -889,19 +966,47 @@ def secrets_put(
         Optional[Path],
         typer.Option("--file", help="Read values from file (default: stdin)", exists=True, readable=True),
     ] = None,
+    merge: Annotated[
+        bool,
+        typer.Option(
+            "--merge",
+            help="Upsert keys only (create/edit); leave other keys untouched. Default replaces the whole map.",
+        ),
+    ] = False,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format for put response metadata")] = "json",
 ) -> None:
-    """Replace the entire secret value map (Access Key). Omitting keys removes them."""
+    """Write secret values (Access Key). Default replaces the entire map; --merge upserts keys."""
     try:
         fmt = _secrets_format_option(format)
         raw = file.read_text(encoding="utf-8") if file is not None else sys.stdin.read()
         values = parse_secret_format(fmt, raw)
         if not values:
             raise HomeCloudError("secret put requires at least one key/value pair")
-        result = _client(profile).secrets.put_value(name, values)
+        result = _client(profile).secrets.put_value(name, values, merge=merge)
     except SecretFormatError as exc:
         _handle_error(HomeCloudError(str(exc)))
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    emit(result, output_format=_output_option(output))
+
+
+@secrets_app.command("set")
+def secrets_set(
+    name: Annotated[str, typer.Argument(help="Secret name")],
+    pairs: Annotated[
+        list[str],
+        typer.Argument(help="One or more KEY=VALUE pairs to upsert"),
+    ],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option(help="Output format for response metadata")] = "json",
+) -> None:
+    """Upsert one or more KEY=VALUE entries (merge). Other keys are left unchanged."""
+    try:
+        values = _parse_secret_pairs(pairs)
+        if not values:
+            raise HomeCloudError("secrets set requires at least one KEY=VALUE")
+        result = _client(profile).secrets.put_value(name, values, merge=True)
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
     emit(result, output_format=_output_option(output))
@@ -1108,7 +1213,7 @@ def so_ls_buckets(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format")] = "table",
 ) -> None:
-    """List storage buckets (Access Key — no login required; falls back to console JWT)."""
+    """List storage buckets (Access Key — no login required)."""
     try:
         items = _client(profile).so.list_buckets()
     except (HomeCloudError, FileNotFoundError, ValueError) as exc:
