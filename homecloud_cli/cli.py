@@ -2208,6 +2208,68 @@ def containers_delete(
         _handle_error(exc)
 
 
+@containers_app.command("scale")
+def containers_scale(
+    service_id: Annotated[str, typer.Argument(help="Service id")],
+    count: Annotated[int, typer.Argument(help="Desired task count")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Scale desired task count (no new Revision)."""
+    try:
+        result = _client(profile).containers.update_service(service_id, desired_count=count)
+        emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@containers_app.command("force-redeploy")
+def containers_force_redeploy(
+    service_id: Annotated[str, typer.Argument(help="Service id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Force redeploy — same Revision, new rollout."""
+    try:
+        result = _client(profile).containers.force_redeploy(service_id)
+        emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@containers_app.command("rollback")
+def containers_rollback(
+    service_id: Annotated[str, typer.Argument(help="Service id")],
+    revision_id: Annotated[str, typer.Argument(help="Target revision id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Rollback Service to a prior Revision."""
+    try:
+        result = _client(profile).containers.rollback(service_id, revision_id)
+        emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@containers_app.command("deployments")
+def containers_deployments(
+    service_id: Annotated[str, typer.Argument(help="Service id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="table|json|yaml")] = "table",
+) -> None:
+    """List deployments (rollouts) for a service."""
+    try:
+        items = _client(profile).containers.list_deployments(service_id)
+        emit(
+            items,
+            output_format=_output_option(output),
+            columns=["id", "kind", "status", "healthy_count", "desired_count", "failure_code"],
+        )
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
 @containers_app.command("tasks")
 def containers_tasks(
     service_id: Annotated[str, typer.Argument(help="Service id")],
