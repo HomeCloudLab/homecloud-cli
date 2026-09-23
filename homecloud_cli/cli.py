@@ -47,6 +47,7 @@ billing_app = typer.Typer(help="Billing commands")
 usage_app = typer.Typer(help="Usage meter commands")
 monitoring_app = typer.Typer(help="Monitoring commands")
 domains_app = typer.Typer(help="Domains and hosted DNS commands")
+containers_app = typer.Typer(help="Managed Containers (Services / Tasks / Logs)")
 secrets_app = typer.Typer(
     help="Secrets: create/list (Access Key SigV1) + get/put/set values (Access Key data plane)"
 )
@@ -65,6 +66,7 @@ app.add_typer(usage_app, name="usage")
 app.add_typer(billing_app, name="billing")
 app.add_typer(monitoring_app, name="monitoring")
 app.add_typer(domains_app, name="domains")
+app.add_typer(containers_app, name="containers")
 app.add_typer(secrets_app, name="secrets")
 
 
@@ -2131,6 +2133,132 @@ def domains_detach(
     """Detach a hostname from a service."""
     try:
         _client(profile).domains.detach(attachment_id)
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@containers_app.command("list")
+def containers_list(
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="table|json|yaml")] = "table",
+) -> None:
+    """List container services (console JWT → compute)."""
+    try:
+        items = _client(profile).containers.list_services()
+        emit(
+            items,
+            output_format=_output_option(output),
+            columns=["name", "status", "region_code", "desired_count", "generation"],
+        )
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@containers_app.command("create")
+def containers_create(
+    name: Annotated[str, typer.Argument(help="Service name")],
+    image: Annotated[str, typer.Option("--image", help="Image ref (tag or digest)")],
+    region: Annotated[str, typer.Option("--region", help="Region code")] = "eu-central",
+    cpu_milli: Annotated[int, typer.Option("--cpu-milli", help="CPU millicores")] = 250,
+    memory_mib: Annotated[int, typer.Option("--memory-mib", help="Memory MiB")] = 512,
+    port: Annotated[Optional[int], typer.Option("--port", help="Container port")] = 80,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Create a container service (202 + Operation)."""
+    try:
+        result = _client(profile).containers.create_service(
+            name=name,
+            region_code=region,
+            image=image,
+            cpu_milli=cpu_milli,
+            memory_mib=memory_mib,
+            port=port,
+        )
+        emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@containers_app.command("get")
+def containers_get(
+    service_id: Annotated[str, typer.Argument(help="Service id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Get a container service."""
+    try:
+        result = _client(profile).containers.get_service(service_id)
+        emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@containers_app.command("delete")
+def containers_delete(
+    service_id: Annotated[str, typer.Argument(help="Service id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Delete a container service (202 + Operation)."""
+    try:
+        result = _client(profile).containers.delete_service(service_id)
+        emit(result, output_format=_output_option(output))
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@containers_app.command("tasks")
+def containers_tasks(
+    service_id: Annotated[str, typer.Argument(help="Service id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="table|json|yaml")] = "table",
+) -> None:
+    """List tasks for a service."""
+    try:
+        items = _client(profile).containers.list_tasks(service_id)
+        emit(
+            items,
+            output_format=_output_option(output),
+            columns=["id", "observed_state", "healthy", "desired_state", "failure_code"],
+        )
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@containers_app.command("revisions")
+def containers_revisions(
+    service_id: Annotated[str, typer.Argument(help="Service id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="table|json|yaml")] = "table",
+) -> None:
+    """List revisions for a service."""
+    try:
+        items = _client(profile).containers.list_revisions(service_id)
+        emit(
+            items,
+            output_format=_output_option(output),
+            columns=["revision_number", "image_digest", "cpu_milli", "memory_mib"],
+        )
+    except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@containers_app.command("logs")
+def containers_logs(
+    task_id: Annotated[str, typer.Argument(help="Task id")],
+    limit: Annotated[int, typer.Option("--limit", help="Max log lines")] = 200,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="table|json|yaml")] = "table",
+) -> None:
+    """Show retained logs for a task."""
+    try:
+        items = _client(profile).containers.task_logs(task_id, limit=limit)
+        emit(
+            items,
+            output_format=_output_option(output),
+            columns=["ts", "stream", "line"],
+        )
     except HomeCloudError as exc:
         _handle_error(exc)
 
