@@ -1783,6 +1783,143 @@ def test_ir_login_runs_docker(
     assert "Login Succeeded" in result.stdout
 
 
+def test_cli_tasks_help(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["tasks", "--help"])
+    assert result.exit_code == 0
+    for name in ("search", "list", "mine", "create", "update", "assign-me", "comment", "activity", "archive", "share"):
+        assert name in result.stdout
+
+
+def test_cli_diagrams_help(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["diagrams", "--help"])
+    assert result.exit_code == 0
+    assert "list" in result.stdout
+    assert "create" in result.stdout
+    assert "patch" in result.stdout
+
+
+def test_parse_due_at_relative() -> None:
+    from homecloud_cli.tasks_cmd import parse_due_at
+
+    assert parse_due_at(None) is None
+    assert parse_due_at("today") is not None
+    assert parse_due_at("+3d") is not None
+    assert parse_due_at("2026-10-20T12:00:00Z") == "2026-10-20T12:00:00Z"
+
+
+def test_cli_tasks_and_diagrams_crud(monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeTasks:
+        def list(self, **kwargs: object) -> list[dict[str, object]]:
+            calls.append(("tasks.list", kwargs))
+            return [
+                {
+                    "key": "TASK-1",
+                    "title": "Rotate cert",
+                    "type": "task",
+                    "status": "open",
+                    "priority": "p3",
+                    "assignee": {"username": "alice"},
+                    "labels": [{"name": "ops"}],
+                }
+            ]
+
+        def search(self, query: str = "", **kwargs: object) -> list[dict[str, object]]:
+            calls.append(("tasks.search", {"q": query, **kwargs}))
+            return self.list(q=query, **kwargs)
+
+        def get(self, key: str) -> dict[str, object]:
+            calls.append(("tasks.get", key))
+            return {"key": key, "title": "Rotate cert", "status": "open"}
+
+        def create(self, title: str, **kwargs: object) -> dict[str, object]:
+            calls.append(("tasks.create", {"title": title, **kwargs}))
+            return {"key": "TASK-2", "title": title, "status": "open"}
+
+        def update(self, key: str, **kwargs: object) -> dict[str, object]:
+            calls.append(("tasks.update", {"key": key, **kwargs}))
+            return {"key": key, "status": kwargs.get("status", "open")}
+
+        def assign_me(self, key: str, *, status: str | None = None) -> dict[str, object]:
+            calls.append(("tasks.assign_me", {"key": key, "status": status}))
+            return {"key": key, "status": status or "open"}
+
+        def comment(self, key: str, body: str, **kwargs: object) -> dict[str, object]:
+            calls.append(("tasks.comment", {"key": key, "body": body}))
+            return {"key": key, "comment_id": "c1"}
+
+        def activity(self, key: str) -> list[dict[str, object]]:
+            return [{"event_type": "commented", "created_at": "t", "actor": {"username": "a"}, "payload": {"body": "hi"}}]
+
+    class FakeDiagrams:
+        def list(self) -> list[dict[str, object]]:
+            calls.append(("diagrams.list", None))
+            return [{"id": "d1", "name": "Plan", "revision": 1, "node_count": 0, "edge_count": 0}]
+
+        def get(self, diagram_id: str) -> dict[str, object]:
+            calls.append(("diagrams.get", diagram_id))
+            return {"id": diagram_id, "name": "Plan", "document": {"nodes": []}}
+
+        def create(self, name: str, **kwargs: object) -> dict[str, object]:
+            calls.append(("diagrams.create", {"name": name, **kwargs}))
+            return {"id": "d2", "name": name, "revision": 1}
+
+        def update(self, diagram_id: str, **kwargs: object) -> dict[str, object]:
+            calls.append(("diagrams.update", {"id": diagram_id, **kwargs}))
+            return {"id": diagram_id, "name": kwargs.get("name") or "Plan", "revision": 2}
+
+    class FakeClient:
+        tasks = FakeTasks()
+        diagrams = FakeDiagrams()
+
+    monkeypatch.setattr("homecloud_cli.cli._client", lambda *args, **kwargs: FakeClient())
+
+    listed = runner.invoke(app, ["tasks", "list", "--status", "open", "--output", "json"])
+    assert listed.exit_code == 0, listed.stdout
+    assert "TASK-1" in listed.stdout
+
+    searched = runner.invoke(app, ["tasks", "search", "cert", "@alice", "--output", "json"])
+    assert searched.exit_code == 0, searched.stdout
+
+    created = runner.invoke(
+        app,
+        [
+            "tasks",
+            "create",
+            "Ship CLI",
+            "--type",
+            "change",
+            "--assignee",
+            "alice",
+            "--priority",
+            "p2",
+            "--output",
+            "json",
+        ],
+    )
+    assert created.exit_code == 0, created.stdout
+
+    patched = runner.invoke(
+        app,
+        ["tasks", "update", "TASK-2", "--status", "in_progress", "--assign-me", "--output", "json"],
+    )
+    assert patched.exit_code == 0, patched.stdout
+
+    assigned = runner.invoke(app, ["tasks", "assign-me", "TASK-2", "--status", "waiting", "--output", "json"])
+    assert assigned.exit_code == 0, assigned.stdout
+
+    commented = runner.invoke(app, ["tasks", "comment", "TASK-2", "shipped", "--output", "json"])
+    assert commented.exit_code == 0, commented.stdout
+
+    dlist = runner.invoke(app, ["diagrams", "list", "--output", "json"])
+    assert dlist.exit_code == 0, dlist.stdout
+
+    assert any(c[0] == "tasks.search" for c in calls)
+    assert any(c[0] == "tasks.create" and isinstance(c[1], dict) and c[1].get("assignees") == ["alice"] for c in calls)
+    assert any(c[0] == "tasks.update" and isinstance(c[1], dict) and c[1].get("assignees") == ["me"] for c in calls)
+
+
 def test_ir_login_print_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:

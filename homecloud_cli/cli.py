@@ -48,6 +48,12 @@ usage_app = typer.Typer(help="Usage meter commands")
 monitoring_app = typer.Typer(help="Monitoring commands")
 domains_app = typer.Typer(help="Domains and hosted DNS commands")
 containers_app = typer.Typer(help="Managed Containers (Services / Tasks / Logs)")
+tasks_app = typer.Typer(
+    help="Tasks: full tracker management (search, assign, comment, labels, archive, share)"
+)
+diagrams_app = typer.Typer(
+    help="Diagrams: list/get/create/patch (user JWT or user-bound Access Key SigV1)"
+)
 secrets_app = typer.Typer(
     help="Secrets: create/list (Access Key SigV1) + get/put/set values (Access Key data plane)"
 )
@@ -67,7 +73,13 @@ app.add_typer(billing_app, name="billing")
 app.add_typer(monitoring_app, name="monitoring")
 app.add_typer(domains_app, name="domains")
 app.add_typer(containers_app, name="containers")
+app.add_typer(tasks_app, name="tasks")
+app.add_typer(diagrams_app, name="diagrams")
 app.add_typer(secrets_app, name="secrets")
+
+from homecloud_cli.tasks_cmd import register_tasks_commands  # noqa: E402
+
+register_tasks_commands(tasks_app)
 
 
 def _profile_option(profile: Optional[str]) -> str | None:
@@ -2322,6 +2334,113 @@ def containers_logs(
             columns=["ts", "stream", "line"],
         )
     except HomeCloudError as exc:
+        _handle_error(exc)
+
+
+@diagrams_app.command("list")
+def diagrams_list(
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="table|json|yaml")] = "table",
+) -> None:
+    """List diagrams (requires diagrams.read)."""
+    try:
+        items = _client(profile).diagrams.list()
+        emit(
+            items,
+            output_format=_output_option(output),
+            columns=["id", "name", "revision", "node_count", "edge_count"],
+        )
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+
+
+@diagrams_app.command("get")
+def diagrams_get(
+    diagram_id: Annotated[str, typer.Argument(help="Diagram id")],
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Show a diagram including its document."""
+    try:
+        emit(_client(profile).diagrams.get(diagram_id), output_format=_output_option(output))
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+
+
+@diagrams_app.command("create")
+def diagrams_create(
+    name: Annotated[str, typer.Argument(help="Diagram name")],
+    description: Annotated[Optional[str], typer.Option("--description", "-d")] = None,
+    document_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--document-file",
+            help="JSON document file (nodes/edges)",
+            exists=True,
+            readable=True,
+        ),
+    ] = None,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Create a diagram (requires diagrams.create)."""
+    try:
+        document: dict[str, Any] | None = None
+        if document_file is not None:
+            document = json.loads(document_file.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                raise HomeCloudError("--document-file must contain a JSON object")
+        result = _client(profile).diagrams.create(
+            name, description=description, document=document
+        )
+        emit(result, output_format=_output_option(output))
+    except json.JSONDecodeError as exc:
+        _handle_error(HomeCloudError(f"invalid JSON in --document-file: {exc}"))
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+
+
+@diagrams_app.command("patch")
+def diagrams_patch(
+    diagram_id: Annotated[str, typer.Argument(help="Diagram id")],
+    name: Annotated[Optional[str], typer.Option("--name")] = None,
+    description: Annotated[Optional[str], typer.Option("--description", "-d")] = None,
+    document_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--document-file",
+            help="JSON document file (nodes/edges)",
+            exists=True,
+            readable=True,
+        ),
+    ] = None,
+    revision: Annotated[
+        Optional[int],
+        typer.Option("--revision", help="Expected revision for optimistic lock"),
+    ] = None,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o")] = "json",
+) -> None:
+    """Update a diagram (requires diagrams.update)."""
+    try:
+        document: dict[str, Any] | None = None
+        if document_file is not None:
+            document = json.loads(document_file.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                raise HomeCloudError("--document-file must contain a JSON object")
+        if name is None and description is None and document is None:
+            raise HomeCloudError("pass --name, --description, and/or --document-file")
+        result = _client(profile).diagrams.update(
+            diagram_id,
+            name=name,
+            description=description,
+            document=document,
+            revision=revision,
+        )
+        emit(result, output_format=_output_option(output))
+    except json.JSONDecodeError as exc:
+        _handle_error(HomeCloudError(f"invalid JSON in --document-file: {exc}"))
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
         _handle_error(exc)
 
 
