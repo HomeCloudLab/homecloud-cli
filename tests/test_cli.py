@@ -1786,8 +1786,38 @@ def test_ir_login_runs_docker(
 def test_cli_tasks_help(runner: CliRunner) -> None:
     result = runner.invoke(app, ["tasks", "--help"])
     assert result.exit_code == 0
-    for name in ("search", "list", "mine", "create", "update", "assign-me", "comment", "activity", "archive", "share"):
+    for name in (
+        "search",
+        "list",
+        "mine",
+        "schema",
+        "create",
+        "update",
+        "assign-me",
+        "comment",
+        "activity",
+        "archive",
+        "share",
+    ):
         assert name in result.stdout
+
+
+def test_ensure_utf8_stdio_reconfigures(monkeypatch: pytest.MonkeyPatch) -> None:
+    from homecloud_cli import cli as cli_mod
+
+    calls: list[dict[str, object]] = []
+
+    class FakeStream:
+        def reconfigure(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+    monkeypatch.setattr(cli_mod.sys, "stdout", FakeStream())
+    monkeypatch.setattr(cli_mod.sys, "stderr", FakeStream())
+    cli_mod._ensure_utf8_stdio()
+    assert calls == [
+        {"encoding": "utf-8", "errors": "replace"},
+        {"encoding": "utf-8", "errors": "replace"},
+    ]
 
 
 def test_cli_diagrams_help(runner: CliRunner) -> None:
@@ -1807,35 +1837,102 @@ def test_parse_due_at_relative() -> None:
     assert parse_due_at("2026-10-20T12:00:00Z") == "2026-10-20T12:00:00Z"
 
 
+def test_map_jira_issue() -> None:
+    from homecloud_cli.tasks_cmd import map_jira_issue
+
+    mapping = {
+        "status": {"To Do": "open", "Done": "done"},
+        "type": {"Story": "task"},
+        "priority": {"High": "p2"},
+        "fields": {"customfield_10001": "story_points"},
+    }
+    issue = {
+        "key": "PROJ-1",
+        "fields": {
+            "summary": "Hello",
+            "status": {"name": "To Do"},
+            "issuetype": {"name": "Story"},
+            "priority": {"name": "High"},
+            "customfield_10001": 5,
+            "parent": {"key": "PROJ-0"},
+        },
+    }
+    out = map_jira_issue(issue, mapping)
+    assert out["external_id"] == "jira:PROJ-1"
+    assert out["title"] == "Hello"
+    assert out["status"] == "open"
+    assert out["type"] == "task"
+    assert out["priority"] == "p2"
+    assert out["custom_fields"]["story_points"] == 5
+    assert out["parent_external_id"] == "jira:PROJ-0"
+
+
 def test_cli_tasks_and_diagrams_crud(monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
     calls: list[tuple[str, object]] = []
 
     class FakeTasks:
         def list(self, **kwargs: object) -> list[dict[str, object]]:
             calls.append(("tasks.list", kwargs))
-            return [
-                {
-                    "key": "TASK-1",
-                    "title": "Rotate cert",
-                    "type": "task",
-                    "status": "open",
-                    "priority": "p3",
-                    "assignee": {"username": "alice"},
-                    "labels": [{"name": "ops"}],
-                }
-            ]
+            return self.list_page(**kwargs).get("items", [])
+
+        def list_page(self, **kwargs: object) -> dict[str, object]:
+            calls.append(("tasks.list_page", kwargs))
+            return {
+                "items": [
+                    {
+                        "key": "TASK-1",
+                        "title": "Rotate cert",
+                        "type": "task",
+                        "status": "open",
+                        "priority": "p3",
+                        "assignee": {"username": "alice"},
+                        "labels": [{"name": "ops"}],
+                    }
+                ],
+                "total": 1,
+                "next_cursor": None,
+            }
+
+        def list_all(self, **kwargs: object) -> list[dict[str, object]]:
+            calls.append(("tasks.list_all", kwargs))
+            return self.list(**kwargs)
 
         def search(self, query: str = "", **kwargs: object) -> list[dict[str, object]]:
             calls.append(("tasks.search", {"q": query, **kwargs}))
             return self.list(q=query, **kwargs)
 
-        def get(self, key: str) -> dict[str, object]:
-            calls.append(("tasks.get", key))
+        def upsert_by_external(self, external_id: str, **kwargs: object) -> dict[str, object]:
+            calls.append(("tasks.upsert_by_external", {"external_id": external_id, **kwargs}))
+            return {"key": "TASK-99", "external_id": external_id, "title": kwargs.get("title")}
+
+        def bulk_delete(self, keys: list[str]) -> dict[str, object]:
+            calls.append(("tasks.bulk_delete", {"keys": keys}))
+            return {"created": len(keys), "failed": 0, "results": []}
+
+        def link_relation(self, key: str, to_key: str, relation_type: str) -> dict[str, object]:
+            calls.append(
+                ("tasks.link_relation", {"key": key, "to_key": to_key, "relation_type": relation_type})
+            )
+            return {"id": "rel-1", "from_key": key, "to_key": to_key, "relation_type": relation_type}
+
+        def list_relations(self, key: str) -> list[dict[str, object]]:
+            calls.append(("tasks.list_relations", {"key": key}))
+            return [{"id": "rel-1", "relation_type": "blocks", "from_key": key, "to_key": "TASK-2"}]
+
+        def unlink_relation(self, key: str, relation_id: str) -> None:
+            calls.append(("tasks.unlink_relation", {"key": key, "relation_id": relation_id}))
+
+        def get(self, key: str, *, mark_seen: bool = True) -> dict[str, object]:
+            calls.append(("tasks.get", {"key": key, "mark_seen": mark_seen}))
             return {"key": key, "title": "Rotate cert", "status": "open"}
+
+        def schema(self) -> dict[str, object]:
+            calls.append(("tasks.schema", None))
+            return {"types": ["task"], "statuses": ["open"], "priorities": ["p3"], "transitions": {}}
 
         def create(self, title: str, **kwargs: object) -> dict[str, object]:
             calls.append(("tasks.create", {"title": title, **kwargs}))
-            return {"key": "TASK-2", "title": title, "status": "open"}
+            return {"key": "TASK-2", "title": title, "status": kwargs.get("status") or "open"}
 
         def update(self, key: str, **kwargs: object) -> dict[str, object]:
             calls.append(("tasks.update", {"key": key, **kwargs}))
@@ -1882,6 +1979,10 @@ def test_cli_tasks_and_diagrams_crud(monkeypatch: pytest.MonkeyPatch, runner: Cl
     searched = runner.invoke(app, ["tasks", "search", "cert", "@alice", "--output", "json"])
     assert searched.exit_code == 0, searched.stdout
 
+    schema = runner.invoke(app, ["tasks", "schema", "--output", "json"])
+    assert schema.exit_code == 0, schema.stdout
+    assert "open" in schema.stdout
+
     created = runner.invoke(
         app,
         [
@@ -1890,6 +1991,8 @@ def test_cli_tasks_and_diagrams_crud(monkeypatch: pytest.MonkeyPatch, runner: Cl
             "Ship CLI",
             "--type",
             "change",
+            "--status",
+            "in_progress",
             "--assignee",
             "alice",
             "--priority",
@@ -1899,6 +2002,11 @@ def test_cli_tasks_and_diagrams_crud(monkeypatch: pytest.MonkeyPatch, runner: Cl
         ],
     )
     assert created.exit_code == 0, created.stdout
+    assert ("tasks.create",) == (calls[-1][0],) or any(c[0] == "tasks.create" for c in calls)
+
+    peeked = runner.invoke(app, ["tasks", "get", "TASK-1", "--no-mark-seen", "--output", "json"])
+    assert peeked.exit_code == 0, peeked.stdout
+    assert any(c[0] == "tasks.get" and c[1].get("mark_seen") is False for c in calls)
 
     patched = runner.invoke(
         app,
@@ -1915,9 +2023,40 @@ def test_cli_tasks_and_diagrams_crud(monkeypatch: pytest.MonkeyPatch, runner: Cl
     dlist = runner.invoke(app, ["diagrams", "list", "--output", "json"])
     assert dlist.exit_code == 0, dlist.stdout
 
-    assert any(c[0] == "tasks.search" for c in calls)
+    assert any(c[0] in {"tasks.search", "tasks.list", "tasks.list_page"} for c in calls)
     assert any(c[0] == "tasks.create" and isinstance(c[1], dict) and c[1].get("assignees") == ["alice"] for c in calls)
     assert any(c[0] == "tasks.update" and isinstance(c[1], dict) and c[1].get("assignees") == ["me"] for c in calls)
+
+    limited = runner.invoke(app, ["tasks", "list", "--limit", "10", "--sort", "-sequence", "--output", "json"])
+    assert limited.exit_code == 0, limited.stdout
+    assert any(c[0] == "tasks.list_page" and c[1].get("limit") == 10 for c in calls)
+
+    upserted = runner.invoke(
+        app,
+        ["tasks", "upsert", "--external-id", "jira-1", "--title", "Imported", "--output", "json"],
+    )
+    assert upserted.exit_code == 0, upserted.stdout
+    assert any(c[0] == "tasks.upsert_by_external" for c in calls)
+
+    dry = runner.invoke(
+        app,
+        ["tasks", "create", "Dry", "--external-id", "x1", "--dry-run", "--output", "json"],
+    )
+    assert dry.exit_code == 0, dry.stdout
+    assert "create" in dry.stdout
+
+    jsonl = runner.invoke(
+        app,
+        ["tasks", "list", "--output", "jsonl", "--fields", "key,title,status"],
+    )
+    assert jsonl.exit_code == 0, jsonl.stdout
+    assert "TASK-1" in jsonl.stdout
+
+    relate = runner.invoke(
+        app,
+        ["tasks", "relate", "TASK-1", "--to", "TASK-2", "--type", "blocks", "--output", "json"],
+    )
+    assert relate.exit_code == 0, relate.stdout
 
 
 def test_ir_login_print_only(

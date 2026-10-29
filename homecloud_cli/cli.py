@@ -10,21 +10,26 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, Literal, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
 
-import click
 import typer
 from homecloud_core.defaults import DEFAULT_PROFILE
 from homecloud_core.errors import HomeCloudError
-from homecloud_sdk import HomeCloudClient
-from homecloud_sdk.secret_formats import SecretFormatError, parse_secret_format, serialize_secret_format
-from homecloud_sdk.so_parallel import DEFAULT_SO_WORKERS
-from rich.console import Console
 
 from homecloud_cli import __version__
 from homecloud_cli.output import emit
-from homecloud_cli.so_progress import SoTransferProgress
-from homecloud_cli.transfer_progress import TransferProgress
+
+if TYPE_CHECKING:
+    from homecloud_sdk import HomeCloudClient
+
+# Keep in sync with homecloud_sdk.so_parallel.DEFAULT_SO_WORKERS (avoid importing SDK at startup).
+_SO_DEFAULT_WORKERS = 10
+
+
+def _rich_console(**kwargs: Any):
+    from rich.console import Console
+
+    return Console(**kwargs)
 
 # Managed errors are printed by ``main()`` / ``_handle_error`` — never Rich tracebacks.
 app = typer.Typer(
@@ -92,6 +97,8 @@ def _client(
     mfa_code: Optional[str] = None,
     interactive_mfa: bool = True,
 ) -> HomeCloudClient:
+    from homecloud_sdk import HomeCloudClient
+
     from homecloud_cli.prompts import select_mfa_method
 
     def _choose_mfa(methods: list[str], passkeys: list[dict] | None) -> str:
@@ -125,8 +132,8 @@ def _run_browser_login(client: HomeCloudClient, *, mfa_token: str | None = None)
 
 def _output_option(output: str) -> str:
     normalized = output.lower()
-    if normalized not in {"table", "json", "yaml"}:
-        raise typer.BadParameter("output must be table, json, or yaml")
+    if normalized not in {"table", "json", "yaml", "jsonl"}:
+        raise typer.BadParameter("output must be table, json, yaml, or jsonl")
     return normalized
 
 
@@ -223,19 +230,18 @@ _CLICK_EXIT = tuple(
     t
     for t in (
         typer.Exit,
-        getattr(click.exceptions, "Exit", None),
         getattr(_typer_exc, "Exit", None),
     )
     if t is not None
 )
 _CLICK_EXCEPTION = tuple(
     t
-    for t in (click.ClickException, getattr(_TyperClick, "ClickException", None))
+    for t in (getattr(_TyperClick, "ClickException", None),)
     if t is not None
 )
 _CLICK_ABORT = tuple(
     t
-    for t in (click.Abort, getattr(_typer_exc, "Abort", None))
+    for t in (getattr(_typer_exc, "Abort", None),)
     if t is not None
 )
 _NO_ARGS_IS_HELP = getattr(_typer_exc, "NoArgsIsHelpError", type(None))
@@ -508,6 +514,8 @@ def configure_wizard(
     access_key_id = typer.prompt("Access Key ID")
     secret_access_key = typer.prompt("Secret Access Key", hide_input=True)
 
+    from homecloud_sdk import HomeCloudClient
+
     client = HomeCloudClient(profile=profile_name)
     client.configure(
         access_key_id=access_key_id,
@@ -521,16 +529,30 @@ def configure_import(
     file: Annotated[Path, typer.Argument(help="Credentials JSON from Console")],
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
 ) -> None:
+    from homecloud_sdk import HomeCloudClient
+
     raw = json.loads(file.read_text(encoding="utf-8"))
     client = HomeCloudClient(profile=profile or DEFAULT_PROFILE)
     client.import_credentials(raw)
     typer.echo("Credentials imported.")
 
 
+@config_app.callback(invoke_without_command=True)
+def config_default(
+    ctx: typer.Context,
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    output: Annotated[str, typer.Option("--output", "-o", help="Output format")] = "table",
+) -> None:
+    """Show configuration when no subcommand is given (same as ``config show``)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    config_show(profile=profile, output=output)
+
+
 @config_app.command("show")
 def config_show(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
-    output: Annotated[str, typer.Option(help="Output format")] = "table",
+    output: Annotated[str, typer.Option("--output", "-o", help="Output format")] = "table",
 ) -> None:
     try:
         summary = _client(profile).config_summary()
@@ -905,6 +927,8 @@ def secrets_create(
     output: Annotated[str, typer.Option(help="Output format for create response")] = "json",
 ) -> None:
     """Create a secret (Access Key). Optionally seed initial values."""
+    from homecloud_sdk.secret_formats import SecretFormatError, parse_secret_format
+
     try:
         values: dict[str, str] | None = None
         if file is not None and pairs:
@@ -951,6 +975,8 @@ def secrets_get(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
 ) -> None:
     """Fetch secret values (Access Key). Prints the flat key/value map."""
+    from homecloud_sdk.secret_formats import SecretFormatError, serialize_secret_format
+
     try:
         fmt = _secrets_format_option(format)
         result = _client(profile).secrets.get_value(name, *(key or ()))
@@ -991,6 +1017,8 @@ def secrets_put(
     output: Annotated[str, typer.Option(help="Output format for put response metadata")] = "json",
 ) -> None:
     """Write secret values (Access Key). Default replaces the entire map; --merge upserts keys."""
+    from homecloud_sdk.secret_formats import SecretFormatError, parse_secret_format
+
     try:
         fmt = _secrets_format_option(format)
         raw = file.read_text(encoding="utf-8") if file is not None else sys.stdin.read()
@@ -1059,6 +1087,8 @@ def _run_so_sync_transfer(
     show_progress: bool,
     sync_call: Callable[..., dict[str, int]],
 ) -> dict[str, Any]:
+    from homecloud_cli.transfer_progress import TransferProgress
+
     progress: TransferProgress | None = None
 
     def on_transfer_begin(total_bytes: int, files_total: int) -> None:
@@ -1094,7 +1124,7 @@ def _run_so_sync_transfer(
         if progress is not None:
             progress.message(msg)
         else:
-            Console(stderr=True).print(f"[cyan]{msg}[/]")
+            _rich_console(stderr=True).print(f"[cyan]{msg}[/]")
 
     try:
         return sync_call(
@@ -1184,9 +1214,9 @@ def so_sync(
             "-j",
             min=1,
             max=64,
-            help=f"Parallel file transfers (default {DEFAULT_SO_WORKERS})",
+            help=f"Parallel file transfers (default {_SO_DEFAULT_WORKERS})",
         ),
-    ] = DEFAULT_SO_WORKERS,
+    ] = _SO_DEFAULT_WORKERS,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
     output: Annotated[str, typer.Option(help="Output format (json suppresses live progress)")] = "table",
 ) -> None:
@@ -1274,6 +1304,8 @@ def so_cp(
     output: Annotated[str, typer.Option(help="Output format (json suppresses live progress)")] = "table",
 ) -> None:
     """Copy a file local ↔ bucket, or server-side SO → SO (same or cross-bucket)."""
+    from homecloud_cli.transfer_progress import TransferProgress
+
     source_is_so = _is_so_uri(source)
     dest_is_so = _is_so_uri(destination)
 
@@ -1382,12 +1414,14 @@ def so_rm(
             "-j",
             min=1,
             max=64,
-            help=f"Parallel deletes when using --recursive (default {DEFAULT_SO_WORKERS})",
+            help=f"Parallel deletes when using --recursive (default {_SO_DEFAULT_WORKERS})",
         ),
-    ] = DEFAULT_SO_WORKERS,
+    ] = _SO_DEFAULT_WORKERS,
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
 ) -> None:
     """Delete an object, or recursively delete a bucket/prefix."""
+    from homecloud_cli.so_progress import SoTransferProgress
+
     bucket_name, object_key = _parse_so_uri(uri)
     try:
         if recursive:
@@ -1528,7 +1562,7 @@ def fn_logs(
     try:
         client = _client(profile)
         if invocation_id and follow:
-            console = Console()
+            console = _rich_console()
             for event in client.functions.stream_logs(
                 name, invocation_id, timeout_seconds=timeout
             ):
@@ -1554,7 +1588,7 @@ def fn_logs(
         if invocation_id:
             detail = client.functions.get_invocation(name, invocation_id)
             if output == "table":
-                console = Console()
+                console = _rich_console()
                 console.print(
                     f"[bold]{detail.get('status')}[/bold]  "
                     f"trigger={detail.get('trigger_type')}  "
@@ -1581,7 +1615,7 @@ def fn_logs(
             columns=["id", "status", "trigger_type", "duration_ms", "created_at"],
         )
         if isinstance(page, dict) and page.get("next_cursor") and output == "table":
-            Console().print(f"[dim]next_cursor={page['next_cursor']}[/dim]")
+            _rich_console().print(f"[dim]next_cursor={page['next_cursor']}[/dim]")
     except HomeCloudError as exc:
         _handle_error(exc)
 
@@ -1616,7 +1650,7 @@ def fn_watch(
 
     try:
         client = _client(profile)
-        console = Console()
+        console = _rich_console()
         page = client.functions.logs(name, limit=50)
         items = page.get("items", []) if isinstance(page, dict) else page
         known = {str(i.get("id")) for i in items}
@@ -2444,9 +2478,22 @@ def diagrams_patch(
         _handle_error(exc)
 
 
+def _ensure_utf8_stdio() -> None:
+    """Force UTF-8 on stdout/stderr so Windows redirects do not crash on →/✓/Hebrew."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main() -> None:
     """CLI entrypoint — catch every failure so users never see a Python traceback."""
     try:
+        _ensure_utf8_stdio()
         from homecloud_cli.bootstrap import maybe_self_install
 
         if maybe_self_install():

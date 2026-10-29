@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -13,6 +15,45 @@ from homecloud_core.errors import HomeCloudError
 from homecloud_cli.output import emit
 
 _DUE_RELATIVE = re.compile(r"^\+(\d+)([dw]?)$", re.I)
+
+
+def map_jira_issue(issue: dict[str, Any], mapping: dict[str, Any]) -> dict[str, Any]:
+    """Map one Jira export issue object to HomeCloud upsert fields."""
+    key = str(issue.get("key") or "").strip()
+    fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
+    status_map = mapping.get("status") or {}
+    type_map = mapping.get("type") or {}
+    priority_map = mapping.get("priority") or {}
+    field_map: dict[str, str] = mapping.get("fields") or {}
+
+    status_name = ((fields.get("status") or {}).get("name") or "").strip()
+    type_name = ((fields.get("issuetype") or {}).get("name") or "").strip()
+    priority_name = ((fields.get("priority") or {}).get("name") or "").strip()
+
+    out: dict[str, Any] = {
+        "external_id": f"jira:{key}" if key else None,
+        "title": (fields.get("summary") or key or "Untitled").strip(),
+    }
+    if status_name and status_name in status_map:
+        out["status"] = status_map[status_name]
+    if type_name and type_name in type_map:
+        out["type"] = type_map[type_name]
+    if priority_name and priority_name in priority_map:
+        out["priority"] = priority_map[priority_name]
+    if fields.get("description"):
+        out["description"] = str(fields["description"])[:20000]
+
+    custom: dict[str, Any] = {}
+    for jira_field, hc_key in field_map.items():
+        if jira_field in fields and fields[jira_field] is not None:
+            custom[str(hc_key)] = fields[jira_field]
+    if custom:
+        out["custom_fields"] = custom
+
+    parent = fields.get("parent")
+    if isinstance(parent, dict) and parent.get("key"):
+        out["parent_external_id"] = f"jira:{parent['key']}"
+    return out
 
 
 def _output_option(value: str) -> str:
@@ -68,11 +109,67 @@ def flatten_task_row(item: dict[str, Any]) -> dict[str, Any]:
         "type": item.get("type"),
         "status": item.get("status"),
         "priority": item.get("priority"),
+        "external_id": item.get("external_id") or "",
         "assignee": ", ".join(names) if names else "",
         "labels": ", ".join(label_names) if label_names else "",
         "due_at": item.get("due_at") or "",
         "unread": item.get("unread_count") or 0,
     }
+
+
+def _parse_fields_option(raw: str | None) -> list[str] | None:
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    return parts or None
+
+
+def _task_list_columns(*, wide: bool, include_type: bool = False) -> list[str]:
+    if wide:
+        cols = ["key", "title", "type", "status", "priority", "external_id", "assignee", "labels", "due_at"]
+        return cols
+    if include_type:
+        return ["key", "title", "type", "status", "priority", "assignee", "labels", "due_at"]
+    return ["key", "title", "status", "priority", "assignee", "labels", "due_at"]
+
+
+def _emit_task_items(
+    items: list[dict[str, Any]],
+    *,
+    output: str,
+    fields: str | None,
+    wide: bool,
+    include_type: bool = False,
+) -> None:
+    fmt = _output_option(output)
+    field_list = _parse_fields_option(fields)
+    columns = _task_list_columns(wide=wide, include_type=include_type)
+    if fmt == "table":
+        rows = [flatten_task_row(i) for i in items]
+        emit(rows, output_format=fmt, columns=columns, fields=field_list, wide=wide)
+    else:
+        emit(items, output_format=fmt, fields=field_list, wide=wide)
+
+
+def _fetch_task_items(
+    client: Any,
+    *,
+    all_pages: bool,
+    limit: int | None,
+    cursor: str | None,
+    sort: str | None,
+    **filters: Any,
+) -> list[dict[str, Any]]:
+    api = client.tasks
+    kwargs = dict(filters)
+    if sort:
+        kwargs["sort"] = sort
+    if all_pages:
+        return api.list_all(**kwargs)
+    if limit is not None or cursor:
+        page = api.list_page(**kwargs, limit=limit, cursor=cursor)
+        return page.get("items", [])
+    return api.list(**kwargs)
 
 
 def flatten_activity_row(ev: dict[str, Any]) -> dict[str, Any]:
@@ -92,13 +189,19 @@ def flatten_activity_row(ev: dict[str, Any]) -> dict[str, Any]:
 
 def _load_description(
     description: str | None,
-    description_file: Path | None,
+    description_file: str | None,
 ) -> tuple[str | None, str | None]:
     if description_file is not None and description is not None:
         raise HomeCloudError("pass either --description or --description-file, not both")
     if description_file is not None:
-        text = description_file.read_text(encoding="utf-8")
-        fmt = "markdown" if description_file.suffix.lower() in {".md", ".markdown"} else "plain"
+        if description_file == "-":
+            text = sys.stdin.read()
+            return text, "plain"
+        path = Path(description_file)
+        if not path.is_file():
+            raise HomeCloudError(f"description file not found: {description_file}")
+        text = path.read_text(encoding="utf-8")
+        fmt = "markdown" if path.suffix.lower() in {".md", ".markdown"} else "plain"
         return text, fmt
     return description, None
 
@@ -121,14 +224,25 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         label: Annotated[Optional[str], typer.Option("--label")] = None,
         type: Annotated[Optional[str], typer.Option("--type")] = None,
         archived: Annotated[bool, typer.Option("--archived")] = False,
+        limit: Annotated[Optional[int], typer.Option("--limit", min=1, max=200)] = None,
+        cursor: Annotated[Optional[str], typer.Option("--cursor")] = None,
+        all_pages: Annotated[bool, typer.Option("--all", help="Fetch every page")] = False,
+        sort: Annotated[Optional[str], typer.Option("--sort", help="e.g. -sequence")] = None,
+        fields: Annotated[Optional[str], typer.Option("--fields", help="Comma-separated columns")] = None,
+        wide: Annotated[bool, typer.Option("--wide", help="Extra table columns")] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
         output: Annotated[str, typer.Option("--output", "-o")] = "table",
     ) -> None:
         """Smart search (same grammar as the console search box)."""
         try:
             q = " ".join(query) if query else None
-            items = _client(profile).tasks.search(
-                q or "",
+            items = _fetch_task_items(
+                _client(profile),
+                all_pages=all_pages,
+                limit=limit,
+                cursor=cursor,
+                sort=sort,
+                q=q,
                 status=status,
                 assignee=assignee,
                 watcher=watcher,
@@ -136,12 +250,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
                 type=type,
                 archived=archived,
             )
-            rows = [flatten_task_row(i) for i in items]
-            emit(
-                rows if output == "table" else items,
-                output_format=_output_option(output),
-                columns=["key", "title", "status", "priority", "assignee", "labels", "due_at"],
-            )
+            _emit_task_items(items, output=output, fields=fields, wide=wide)
         except (HomeCloudError, FileNotFoundError, ValueError) as exc:
             _handle_error(exc)
 
@@ -162,6 +271,12 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         mine: Annotated[bool, typer.Option("--mine", help="Shortcut for --assignee me")] = False,
         watching: Annotated[bool, typer.Option("--watching", help="Shortcut for --watcher me")] = False,
         archived: Annotated[bool, typer.Option("--archived")] = False,
+        limit: Annotated[Optional[int], typer.Option("--limit", min=1, max=200)] = None,
+        cursor: Annotated[Optional[str], typer.Option("--cursor")] = None,
+        all_pages: Annotated[bool, typer.Option("--all", help="Fetch every page")] = False,
+        sort: Annotated[Optional[str], typer.Option("--sort", help="e.g. -sequence")] = None,
+        fields: Annotated[Optional[str], typer.Option("--fields", help="Comma-separated columns")] = None,
+        wide: Annotated[bool, typer.Option("--wide", help="Extra table columns")] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
         output: Annotated[str, typer.Option("--output", "-o")] = "table",
     ) -> None:
@@ -171,7 +286,12 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
             if query:
                 joined = " ".join(query)
                 combined = f"{combined} {joined}".strip() if combined else joined
-            items = _client(profile).tasks.list(
+            items = _fetch_task_items(
+                _client(profile),
+                all_pages=all_pages,
+                limit=limit,
+                cursor=cursor,
+                sort=sort,
                 type=type,
                 status=status,
                 assignee="me" if mine else assignee,
@@ -182,42 +302,64 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
                 due=due,
                 archived=archived,
             )
-            rows = [flatten_task_row(i) for i in items]
-            emit(
-                rows if output == "table" else items,
-                output_format=_output_option(output),
-                columns=["key", "title", "type", "status", "priority", "assignee", "labels", "due_at"],
-            )
+            _emit_task_items(items, output=output, fields=fields, wide=wide, include_type=True)
         except (HomeCloudError, FileNotFoundError, ValueError) as exc:
             _handle_error(exc)
 
     @tasks_app.command("mine")
     def tasks_mine(
         status: Annotated[Optional[str], typer.Option("--status")] = None,
+        limit: Annotated[Optional[int], typer.Option("--limit", min=1, max=200)] = None,
+        cursor: Annotated[Optional[str], typer.Option("--cursor")] = None,
+        all_pages: Annotated[bool, typer.Option("--all", help="Fetch every page")] = False,
+        sort: Annotated[Optional[str], typer.Option("--sort")] = None,
+        fields: Annotated[Optional[str], typer.Option("--fields")] = None,
+        wide: Annotated[bool, typer.Option("--wide")] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
         output: Annotated[str, typer.Option("--output", "-o")] = "table",
     ) -> None:
         """Items assigned to you."""
         try:
-            items = _client(profile).tasks.list(assignee="me", status=status)
-            rows = [flatten_task_row(i) for i in items]
-            emit(
-                rows if output == "table" else items,
-                output_format=_output_option(output),
-                columns=["key", "title", "status", "priority", "labels", "due_at"],
+            items = _fetch_task_items(
+                _client(profile),
+                all_pages=all_pages,
+                limit=limit,
+                cursor=cursor,
+                sort=sort,
+                assignee="me",
+                status=status,
             )
+            _emit_task_items(items, output=output, fields=fields, wide=wide)
+        except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+            _handle_error(exc)
+
+    @tasks_app.command("schema")
+    def tasks_schema(
+        profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+        output: Annotated[str, typer.Option("--output", "-o")] = "json",
+    ) -> None:
+        """Show valid types, statuses, priorities, and transitions."""
+        try:
+            emit(_client(profile).tasks.schema(), output_format=_output_option(output))
         except (HomeCloudError, FileNotFoundError, ValueError) as exc:
             _handle_error(exc)
 
     @tasks_app.command("get")
     def tasks_get(
         key: Annotated[str, typer.Argument(help="TASK-12")],
+        no_mark_seen: Annotated[
+            bool,
+            typer.Option("--no-mark-seen", help="Do not mark discussion as seen"),
+        ] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
         output: Annotated[str, typer.Option("--output", "-o")] = "json",
     ) -> None:
-        """Show one item (marks discussion seen, like opening in the console)."""
+        """Show one item (marks discussion seen by default, like the console)."""
         try:
-            emit(_client(profile).tasks.get(key), output_format=_output_option(output))
+            emit(
+                _client(profile).tasks.get(key, mark_seen=not no_mark_seen),
+                output_format=_output_option(output),
+            )
         except (HomeCloudError, FileNotFoundError, ValueError) as exc:
             _handle_error(exc)
 
@@ -225,14 +367,22 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
     def tasks_create(
         title: Annotated[str, typer.Argument(help="Title")],
         type: Annotated[str, typer.Option("--type")] = "task",
+        status: Annotated[
+            Optional[str],
+            typer.Option("--status", help="Initial status (default open)"),
+        ] = None,
         description: Annotated[Optional[str], typer.Option("--description", "-d")] = None,
         description_file: Annotated[
-            Optional[Path],
-            typer.Option("--description-file", exists=True, readable=True),
+            Optional[str],
+            typer.Option("--description-file", help="Path or - for stdin"),
         ] = None,
         description_format: Annotated[
             Optional[str],
             typer.Option("--description-format", help="plain|markdown"),
+        ] = None,
+        external_id: Annotated[
+            Optional[str],
+            typer.Option("--external-id", help="Stable id for import/sync"),
         ] = None,
         assignee: Annotated[
             Optional[list[str]],
@@ -252,6 +402,12 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
             Optional[list[str]],
             typer.Option("--service", help="Linked service name (repeatable)"),
         ] = None,
+        parent: Annotated[Optional[str], typer.Option("--parent", help="Parent task key (TASK-1)")] = None,
+        parent_external_id: Annotated[
+            Optional[str],
+            typer.Option("--parent-external-id", help="Parent external_id"),
+        ] = None,
+        dry_run: Annotated[bool, typer.Option("--dry-run", help="Print planned action only")] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
         output: Annotated[str, typer.Option("--output", "-o")] = "json",
     ) -> None:
@@ -259,9 +415,31 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         try:
             body, auto_fmt = _load_description(description, description_file)
             fmt = description_format or auto_fmt
+            payload = {
+                "action": "create",
+                "title": title,
+                "type": type,
+                "status": status,
+                "external_id": external_id,
+                "description": body,
+                "description_format": fmt,
+                "assignees": assignee,
+                "priority": priority,
+                "severity": severity,
+                "due_at": parse_due_at(due),
+                "label_names": label,
+                "services": service,
+                "parent_key": parent,
+                "parent_external_id": parent_external_id,
+            }
+            if dry_run:
+                typer.echo(json.dumps({k: v for k, v in payload.items() if v is not None}, default=str))
+                return
             result = _client(profile).tasks.create(
                 title,
                 type=type,
+                status=status,
+                external_id=external_id,
                 description=body,
                 description_format=fmt,
                 assignees=assignee,
@@ -270,8 +448,285 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
                 due_at=parse_due_at(due),
                 label_names=label,
                 services=service,
+                parent_key=parent,
+                parent_external_id=parent_external_id,
             )
             emit(result, output_format=_output_option(output))
+        except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+            _handle_error(exc)
+
+    @tasks_app.command("upsert")
+    def tasks_upsert(
+        external_id: Annotated[str, typer.Option("--external-id", help="Required stable id")],
+        title: Annotated[Optional[str], typer.Option("--title")] = None,
+        type: Annotated[Optional[str], typer.Option("--type")] = None,
+        status: Annotated[Optional[str], typer.Option("--status", "-s")] = None,
+        description: Annotated[Optional[str], typer.Option("--description", "-d")] = None,
+        description_file: Annotated[
+            Optional[str],
+            typer.Option("--description-file", help="Path or - for stdin"),
+        ] = None,
+        description_format: Annotated[Optional[str], typer.Option("--description-format")] = None,
+        assignee: Annotated[Optional[list[str]], typer.Option("--assignee", "-a")] = None,
+        priority: Annotated[Optional[str], typer.Option("--priority")] = None,
+        severity: Annotated[Optional[str], typer.Option("--severity")] = None,
+        due: Annotated[Optional[str], typer.Option("--due")] = None,
+        dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+        profile: Annotated[Optional[str], typer.Option()] = None,
+        output: Annotated[str, typer.Option("--output", "-o")] = "json",
+    ) -> None:
+        """Create or update by ``external_id``."""
+        try:
+            body, auto_fmt = _load_description(description, description_file)
+            fmt = description_format or auto_fmt
+            fields: dict[str, Any] = {}
+            if title is not None:
+                fields["title"] = title
+            if type is not None:
+                fields["type"] = type
+            if status is not None:
+                fields["status"] = status
+            if body is not None:
+                fields["description"] = body
+            if fmt is not None:
+                fields["description_format"] = fmt
+            if assignee is not None:
+                fields["assignees"] = assignee
+            if priority is not None:
+                fields["priority"] = priority
+            if severity is not None:
+                fields["severity"] = severity
+            if due is not None:
+                fields["due_at"] = parse_due_at(due)
+            plan = {"action": "upsert", "external_id": external_id, **fields}
+            if dry_run:
+                typer.echo(json.dumps(plan, default=str))
+                return
+            result = _client(profile).tasks.upsert_by_external(external_id, **fields)
+            emit(result, output_format=_output_option(output))
+        except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+            _handle_error(exc)
+
+    @tasks_app.command("import")
+    def tasks_import(
+        file: Annotated[Path, typer.Option("--file", exists=True, readable=True, help="JSONL tasks")],
+        failed_out: Annotated[
+            Optional[Path],
+            typer.Option("--failed-out", help="Write failed lines here"),
+        ] = None,
+        dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+        profile: Annotated[Optional[str], typer.Option()] = None,
+    ) -> None:
+        """Import tasks from JSONL (each line must include ``external_id``)."""
+        try:
+            api = _client(profile).tasks
+            created = updated = failed = 0
+            failed_lines: list[str] = []
+            for line_no, raw in enumerate(file.read_text(encoding="utf-8").splitlines(), start=1):
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    failed += 1
+                    failed_lines.append(raw)
+                    typer.echo(f"line {line_no}: invalid JSON: {exc}", err=True)
+                    continue
+                if not isinstance(row, dict):
+                    failed += 1
+                    failed_lines.append(raw)
+                    typer.echo(f"line {line_no}: expected JSON object", err=True)
+                    continue
+                ext = row.get("external_id")
+                if not ext or not str(ext).strip():
+                    failed += 1
+                    failed_lines.append(raw)
+                    typer.echo(f"line {line_no}: missing external_id", err=True)
+                    continue
+                ext = str(ext).strip()
+                fields = {k: v for k, v in row.items() if k != "external_id" and v is not None}
+                if dry_run:
+                    typer.echo(json.dumps({"action": "upsert", "external_id": ext, **fields}, default=str))
+                    continue
+                before = api.list(external_id=ext, limit=1)
+                try:
+                    api.upsert_by_external(ext, **fields)
+                except HomeCloudError as exc:
+                    failed += 1
+                    failed_lines.append(raw)
+                    typer.echo(f"line {line_no}: {exc}", err=True)
+                    continue
+                if before:
+                    updated += 1
+                else:
+                    created += 1
+            if failed_out is not None and failed_lines:
+                failed_out.write_text("\n".join(failed_lines) + "\n", encoding="utf-8")
+            typer.echo(f"created={created} updated={updated} failed={failed}")
+            if failed:
+                raise typer.Exit(code=1)
+        except typer.Exit:
+            raise
+        except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+            _handle_error(exc)
+
+    @tasks_app.command("import-jira")
+    def tasks_import_jira(
+        file: Annotated[Path, typer.Option("--file", exists=True, readable=True, help="JSONL Jira export")],
+        map_file: Annotated[
+            Path,
+            typer.Option("--map", exists=True, readable=True, help="YAML status/type/priority mapping"),
+        ],
+        failed_out: Annotated[Optional[Path], typer.Option("--failed-out")] = None,
+        dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+        profile: Annotated[Optional[str], typer.Option()] = None,
+    ) -> None:
+        """Import Jira issues (``external_id=jira:KEY``) using a mapping file."""
+        try:
+            import yaml
+
+            mapping = yaml.safe_load(map_file.read_text(encoding="utf-8"))
+            if not isinstance(mapping, dict):
+                raise HomeCloudError("mapping file must be a YAML object")
+            api = _client(profile).tasks
+            created = updated = failed = 0
+            failed_lines: list[str] = []
+            pending_parents: list[tuple[str, str]] = []
+            for line_no, raw in enumerate(file.read_text(encoding="utf-8").splitlines(), start=1):
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    issue = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    failed += 1
+                    failed_lines.append(raw)
+                    typer.echo(f"line {line_no}: invalid JSON: {exc}", err=True)
+                    continue
+                if not isinstance(issue, dict):
+                    failed += 1
+                    failed_lines.append(raw)
+                    continue
+                mapped = map_jira_issue(issue, mapping)
+                ext = mapped.pop("external_id", None)
+                parent_ext = mapped.pop("parent_external_id", None)
+                if not ext:
+                    failed += 1
+                    failed_lines.append(raw)
+                    continue
+                if dry_run:
+                    typer.echo(json.dumps({"action": "upsert", "external_id": ext, **mapped}, default=str))
+                    if parent_ext:
+                        pending_parents.append((ext, parent_ext))
+                    continue
+                before = api.list(external_id=ext, limit=1)
+                try:
+                    api.upsert_by_external(ext, **mapped)
+                except HomeCloudError as exc:
+                    failed += 1
+                    failed_lines.append(raw)
+                    typer.echo(f"line {line_no}: {exc}", err=True)
+                    continue
+                if before:
+                    updated += 1
+                else:
+                    created += 1
+                if parent_ext:
+                    pending_parents.append((ext, parent_ext))
+            for child_ext, parent_ext in pending_parents:
+                if dry_run:
+                    continue
+                try:
+                    child = api.list(external_id=child_ext, limit=1)
+                    if not child:
+                        continue
+                    api.upsert_by_external(child_ext, parent_external_id=parent_ext)
+                except HomeCloudError as exc:
+                    typer.echo(f"parent link {child_ext}: {exc}", err=True)
+            if failed_out is not None and failed_lines:
+                failed_out.write_text("\n".join(failed_lines) + "\n", encoding="utf-8")
+            typer.echo(f"created={created} updated={updated} failed={failed}")
+            if failed:
+                raise typer.Exit(code=1)
+        except typer.Exit:
+            raise
+        except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+            _handle_error(exc)
+
+    @tasks_app.command("bulk-delete")
+    def tasks_bulk_delete(
+        keys: Annotated[Optional[list[str]], typer.Argument(help="TASK-1 TASK-2 …")] = None,
+        file: Annotated[
+            Optional[Path],
+            typer.Option("--file", exists=True, readable=True, help="One key per line"),
+        ] = None,
+        yes: Annotated[bool, typer.Option("--yes", "-y", help="Confirm bulk delete")] = False,
+        profile: Annotated[Optional[str], typer.Option()] = None,
+        output: Annotated[str, typer.Option("--output", "-o")] = "json",
+    ) -> None:
+        """Delete many tasks in one request."""
+        try:
+            from_file: list[str] = []
+            if file is not None:
+                from_file = [ln.strip() for ln in file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            all_keys = list(keys or []) + from_file
+            if not all_keys:
+                raise HomeCloudError("pass task keys or --file")
+            if not yes:
+                raise HomeCloudError("refusing bulk delete without --yes")
+            result = _client(profile).tasks.bulk_delete(all_keys)
+            emit(result, output_format=_output_option(output))
+        except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+            _handle_error(exc)
+
+    @tasks_app.command("relate")
+    def tasks_relate(
+        key: Annotated[str, typer.Argument()],
+        to_key: Annotated[str, typer.Option("--to", help="Other task key")],
+        relation_type: Annotated[
+            str,
+            typer.Option("--type", help="blocks|relates_to|…"),
+        ] = "blocks",
+        profile: Annotated[Optional[str], typer.Option()] = None,
+        output: Annotated[str, typer.Option("--output", "-o")] = "json",
+    ) -> None:
+        """Link this task to another (task relations)."""
+        try:
+            emit(
+                _client(profile).tasks.link_relation(key, to_key, relation_type),
+                output_format=_output_option(output),
+            )
+        except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+            _handle_error(exc)
+
+    @tasks_app.command("relations")
+    def tasks_relations(
+        key: Annotated[str, typer.Argument()],
+        profile: Annotated[Optional[str], typer.Option()] = None,
+        output: Annotated[str, typer.Option("--output", "-o")] = "table",
+    ) -> None:
+        """List task-to-task relations."""
+        try:
+            items = _client(profile).tasks.list_relations(key)
+            emit(
+                items,
+                output_format=_output_option(output),
+                columns=["relation_type", "from_key", "to_key", "id"],
+            )
+        except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+            _handle_error(exc)
+
+    @tasks_app.command("unrelate")
+    def tasks_unrelate(
+        key: Annotated[str, typer.Argument()],
+        relation_id: Annotated[str, typer.Argument(help="Relation uuid")],
+        profile: Annotated[Optional[str], typer.Option()] = None,
+    ) -> None:
+        """Remove a task relation."""
+        try:
+            _client(profile).tasks.unlink_relation(key, relation_id)
+            typer.echo(f"Removed relation {relation_id}")
         except (HomeCloudError, FileNotFoundError, ValueError) as exc:
             _handle_error(exc)
 
@@ -279,7 +734,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         key: str,
         title: Optional[str],
         description: Optional[str],
-        description_file: Optional[Path],
+        description_file: Optional[str],
         description_format: Optional[str],
         type: Optional[str],
         status: Optional[str],
@@ -334,8 +789,8 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         title: Annotated[Optional[str], typer.Option("--title")] = None,
         description: Annotated[Optional[str], typer.Option("--description", "-d")] = None,
         description_file: Annotated[
-            Optional[Path],
-            typer.Option("--description-file", exists=True, readable=True),
+            Optional[str],
+            typer.Option("--description-file", help="Path or - for stdin"),
         ] = None,
         description_format: Annotated[Optional[str], typer.Option("--description-format")] = None,
         type: Annotated[Optional[str], typer.Option("--type")] = None,
@@ -379,8 +834,8 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         title: Annotated[Optional[str], typer.Option("--title")] = None,
         description: Annotated[Optional[str], typer.Option("--description", "-d")] = None,
         description_file: Annotated[
-            Optional[Path],
-            typer.Option("--description-file", exists=True, readable=True),
+            Optional[str],
+            typer.Option("--description-file", help="Path or - for stdin"),
         ] = None,
         description_format: Annotated[Optional[str], typer.Option("--description-format")] = None,
         type: Annotated[Optional[str], typer.Option("--type")] = None,
