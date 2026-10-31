@@ -407,6 +407,10 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
             Optional[str],
             typer.Option("--parent-external-id", help="Parent external_id"),
         ] = None,
+        project_id: Annotated[
+            Optional[str],
+            typer.Option("--project-id", help="Account project UUID"),
+        ] = None,
         dry_run: Annotated[bool, typer.Option("--dry-run", help="Print planned action only")] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
         output: Annotated[str, typer.Option("--output", "-o")] = "json",
@@ -431,6 +435,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
                 "services": service,
                 "parent_key": parent,
                 "parent_external_id": parent_external_id,
+                "project_id": project_id,
             }
             if dry_run:
                 typer.echo(json.dumps({k: v for k, v in payload.items() if v is not None}, default=str))
@@ -450,6 +455,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
                 services=service,
                 parent_key=parent,
                 parent_external_id=parent_external_id,
+                project_id=project_id,
             )
             emit(result, output_format=_output_option(output))
         except (HomeCloudError, FileNotFoundError, ValueError) as exc:
@@ -745,6 +751,8 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         priority: Optional[str],
         severity: Optional[str],
         assign_me: bool,
+        project_id: Optional[str],
+        clear_project: bool,
         profile: Optional[str],
         output: str,
     ) -> None:
@@ -776,6 +784,12 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
                 fields["priority"] = priority
             if severity is not None:
                 fields["severity"] = severity
+            if project_id is not None and clear_project:
+                raise HomeCloudError("use either --project-id or --clear-project, not both")
+            if project_id is not None:
+                fields["project_id"] = project_id
+            if clear_project:
+                fields["clear_project"] = True
             if not fields:
                 raise HomeCloudError("pass at least one field to update")
             result = _client(profile).tasks.update(key, **fields)
@@ -805,6 +819,11 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         priority: Annotated[Optional[str], typer.Option("--priority")] = None,
         severity: Annotated[Optional[str], typer.Option("--severity")] = None,
         assign_me: Annotated[bool, typer.Option("--assign-me", help="Assign to yourself")] = False,
+        project_id: Annotated[
+            Optional[str],
+            typer.Option("--project-id", help="Move task to account project UUID"),
+        ] = None,
+        clear_project: Annotated[bool, typer.Option("--clear-project")] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
         output: Annotated[str, typer.Option("--output", "-o")] = "json",
     ) -> None:
@@ -824,6 +843,8 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
             priority,
             severity,
             assign_me,
+            project_id,
+            clear_project,
             profile,
             output,
         )
@@ -850,6 +871,11 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         priority: Annotated[Optional[str], typer.Option("--priority")] = None,
         severity: Annotated[Optional[str], typer.Option("--severity")] = None,
         assign_me: Annotated[bool, typer.Option("--assign-me", help="Assign to yourself")] = False,
+        project_id: Annotated[
+            Optional[str],
+            typer.Option("--project-id", help="Move task to account project UUID"),
+        ] = None,
+        clear_project: Annotated[bool, typer.Option("--clear-project")] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
         output: Annotated[str, typer.Option("--output", "-o")] = "json",
     ) -> None:
@@ -869,6 +895,8 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
             priority,
             severity,
             assign_me,
+            project_id,
+            clear_project,
             profile,
             output,
         )
