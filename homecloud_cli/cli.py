@@ -62,6 +62,9 @@ diagrams_app = typer.Typer(
 secrets_app = typer.Typer(
     help="Secrets: create/list (Access Key SigV1) + get/put/set values (Access Key data plane)"
 )
+mcp_app = typer.Typer(
+    help="Remote MCP helpers: export Console JWT for Cursor/Claude (never commit the token)"
+)
 
 app.add_typer(configure_app, name="configure")
 app.add_typer(config_app, name="config")
@@ -81,6 +84,7 @@ app.add_typer(containers_app, name="containers")
 app.add_typer(tasks_app, name="tasks")
 app.add_typer(diagrams_app, name="diagrams")
 app.add_typer(secrets_app, name="secrets")
+app.add_typer(mcp_app, name="mcp")
 
 from homecloud_cli.tasks_cmd import register_tasks_commands  # noqa: E402
 
@@ -618,6 +622,53 @@ def login(
     except HomeCloudError as exc:
         _handle_error(exc)
     typer.echo("✓ Logged in")
+
+
+def _session_access_token(profile: Optional[str]) -> str:
+    from homecloud_core.session import get_access_token
+
+    name = profile or DEFAULT_PROFILE
+    token = get_access_token(name)
+    if not token:
+        typer.echo(
+            "No Console JWT in session. Run: homecloud login   "
+            "(then export for Cursor/Claude — do not commit the token).",
+            err=True,
+        )
+        raise typer.Exit(1)
+    return token
+
+
+@mcp_app.command("print-token")
+def mcp_print_token(
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+) -> None:
+    """Print the Console JWT from ``~/.homecloud/session`` (stdout only).
+
+    Use with Remote MCP: set ``HC_ACCESS_TOKEN`` from this value in the shell that
+    starts Cursor/Claude. Prefer ``homecloud mcp env``. Never put the JWT in git.
+    """
+    typer.echo(_session_access_token(profile))
+
+
+@mcp_app.command("env")
+def mcp_env(
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    shell: Annotated[
+        str,
+        typer.Option(help="Shell syntax: bash|powershell|cmd"),
+    ] = "bash",
+) -> None:
+    """Print a shell snippet that exports ``HC_ACCESS_TOKEN`` for Remote MCP clients."""
+    token = _session_access_token(profile)
+    kind = (shell or "bash").strip().lower()
+    if kind in ("powershell", "pwsh", "ps"):
+        typer.echo(f'$env:HC_ACCESS_TOKEN = "{token}"')
+    elif kind in ("cmd", "bat", "windows-cmd"):
+        typer.echo(f"set HC_ACCESS_TOKEN={token}")
+    else:
+        # bash / zsh / fish-compatible export
+        typer.echo(f"export HC_ACCESS_TOKEN={token}")
 
 
 @accounts_app.command("list")
