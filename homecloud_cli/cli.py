@@ -651,6 +651,50 @@ def mcp_print_token(
     typer.echo(_session_access_token(profile))
 
 
+@mcp_app.command("token")
+def mcp_token(
+    profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
+    shell: Annotated[
+        str,
+        typer.Option(help="Shell syntax for export snippet: bash|powershell|cmd|raw"),
+    ] = "raw",
+) -> None:
+    """Exchange a user-bound Access Key (SigV1) for a short-lived MCP Bearer JWT.
+
+    Requires ``homecloud configure`` Access Key credentials (not a service account).
+    Use for agents that cannot run interactive ``homecloud login``.
+    """
+    try:
+        client = _client(profile)
+        if not getattr(client._ctx, "has_access_key", False):  # noqa: SLF001
+            typer.echo(
+                "No Access Key in profile. Run: homecloud configure  (user-bound key)",
+                err=True,
+            )
+            raise typer.Exit(1)
+        account_id = client._ctx.account_id()  # noqa: SLF001
+        data = client._ctx.transport.console_signed_request(  # noqa: SLF001
+            "POST",
+            "mcp/token",
+            account_id,
+        )
+    except (HomeCloudError, FileNotFoundError, ValueError) as exc:
+        _handle_error(exc)
+    token = (data or {}).get("access_token")
+    if not token:
+        typer.echo("mcp/token response missing access_token", err=True)
+        raise typer.Exit(1)
+    kind = (shell or "raw").strip().lower()
+    if kind in ("powershell", "pwsh", "ps"):
+        typer.echo(f'$env:HC_ACCESS_TOKEN = "{token}"')
+    elif kind in ("cmd", "bat", "windows-cmd"):
+        typer.echo(f"set HC_ACCESS_TOKEN={token}")
+    elif kind in ("bash", "zsh", "sh", "export"):
+        typer.echo(f"export HC_ACCESS_TOKEN={token}")
+    else:
+        typer.echo(token)
+
+
 @mcp_app.command("env")
 def mcp_env(
     profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
@@ -658,8 +702,19 @@ def mcp_env(
         str,
         typer.Option(help="Shell syntax: bash|powershell|cmd"),
     ] = "bash",
+    persist: Annotated[
+        bool,
+        typer.Option(
+            "--persist",
+            help="Also write HC_ACCESS_TOKEN to the user environment (Windows) or ~/.config/homecloud/mcp.env",
+        ),
+    ] = False,
 ) -> None:
-    """Print a shell snippet that exports ``HC_ACCESS_TOKEN`` for Remote MCP clients."""
+    """Print a shell snippet that exports ``HC_ACCESS_TOKEN`` for Remote MCP clients.
+
+    With ``--persist`` on Windows, also sets the User env var so Cursor picks it up
+    after a full IDE restart (process env alone is not enough when Cursor was already open).
+    """
     token = _session_access_token(profile)
     kind = (shell or "bash").strip().lower()
     if kind in ("powershell", "pwsh", "ps"):
@@ -669,6 +724,57 @@ def mcp_env(
     else:
         # bash / zsh / fish-compatible export
         typer.echo(f"export HC_ACCESS_TOKEN={token}")
+
+    if persist:
+        import os
+        import sys
+        from pathlib import Path
+
+        if sys.platform == "win32":
+            try:
+                import winreg
+
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Environment",
+                    0,
+                    winreg.KEY_SET_VALUE,
+                )
+                try:
+                    winreg.SetValueEx(key, "HC_ACCESS_TOKEN", 0, winreg.REG_SZ, token)
+                finally:
+                    winreg.CloseKey(key)
+                # Broadcast so new processes see the change without logoff.
+                try:
+                    import ctypes
+
+                    HWND_BROADCAST = 0xFFFF
+                    WM_SETTINGCHANGE = 0x001A
+                    ctypes.windll.user32.SendMessageW(
+                        HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment"
+                    )
+                except Exception:
+                    pass
+                typer.echo(
+                    "# Persisted HC_ACCESS_TOKEN to Windows User env — fully restart Cursor/Claude.",
+                    err=True,
+                )
+            except OSError as exc:
+                typer.echo(f"Failed to persist User env: {exc}", err=True)
+                raise typer.Exit(1) from exc
+        else:
+            path = Path.home() / ".config" / "homecloud" / "mcp.env"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"HC_ACCESS_TOKEN={token}\n", encoding="utf-8")
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            typer.echo(
+                f"# Persisted to {path} — source it before starting the IDE, or restart the IDE.",
+                err=True,
+            )
+
 
 
 @accounts_app.command("list")
