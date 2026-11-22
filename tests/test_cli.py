@@ -2087,3 +2087,84 @@ def test_ir_login_print_only(
     assert "get-login-password" in result.stdout
     assert "HCAKTEST" in result.stdout
     assert "ir.holab.abrdns.com" in result.stdout
+
+
+def test_normalize_priority() -> None:
+    from homecloud_core.errors import HomeCloudError
+
+    from homecloud_cli.tasks_cmd import normalize_priority
+
+    assert normalize_priority(None) is None
+    for raw, expected in {
+        "p1": "p1",
+        "P2": "p2",
+        "3": "p3",
+        "Low": "p4",
+        "URGENT": "p1",
+        "normal": "p3",
+        "High": "p2",
+        "קריטי": "p1",
+        "גבוה": "p2",
+        "בינוני": "p3",
+        "נמוך": "p4",
+    }.items():
+        assert normalize_priority(raw) == expected
+    with pytest.raises(HomeCloudError, match="accepted values"):
+        normalize_priority("5")
+
+
+def test_priority_labels_in_rows() -> None:
+    from homecloud_cli.tasks_cmd import flatten_activity_row, flatten_task_row
+
+    assert flatten_task_row({"key": "TASK-1", "priority": "p2"})["priority"] == "High (p2)"
+    assert flatten_task_row({"key": "TASK-1"})["priority"] == ""
+    row = flatten_activity_row(
+        {"event_type": "priority_changed", "payload": {"from": "p3", "to": "p1"}}
+    )
+    assert row["summary"] == "priority: Medium (p3) -> Critical (p1)"
+
+
+def test_cli_tasks_area_and_priority_options(monkeypatch: pytest.MonkeyPatch, runner: CliRunner) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeTasks:
+        def list(self, **kwargs: object) -> list[dict[str, object]]:
+            calls.append(("list", kwargs))
+            return [{"key": "TASK-1", "title": "t", "status": "open", "priority": "p2"}]
+
+        def create(self, title: str, **kwargs: object) -> dict[str, object]:
+            calls.append(("create", kwargs))
+            return {"key": "TASK-2"}
+
+        def update(self, key: str, **kwargs: object) -> dict[str, object]:
+            calls.append(("update", kwargs))
+            return {"key": key}
+
+    class FakeClient:
+        tasks = FakeTasks()
+
+    monkeypatch.setattr("homecloud_cli.cli._client", lambda *args, **kwargs: FakeClient())
+
+    listed = runner.invoke(app, ["tasks", "list", "--area", "a-1"])
+    assert listed.exit_code == 0, listed.stdout
+    assert calls[-1][1]["project_id"] == "a-1"
+    assert "High (p2)" in listed.stdout
+
+    created = runner.invoke(
+        app, ["tasks", "create", "T", "--priority", "גבוה", "--area-id", "a-2", "--output", "json"]
+    )
+    assert created.exit_code == 0, created.stdout
+    assert calls[-1][1]["priority"] == "p2"
+    assert calls[-1][1]["project_id"] == "a-2"
+
+    updated = runner.invoke(app, ["tasks", "update", "TASK-1", "--priority", "urgent", "--clear-area"])
+    assert updated.exit_code == 0, updated.stdout
+    assert calls[-1][1] == {"priority": "p1", "clear_project": True}
+
+    both = runner.invoke(app, ["tasks", "update", "TASK-1", "--area", "a-3", "--clear-area"])
+    assert both.exit_code != 0
+    assert "--area-id" in both.output
+
+    bad = runner.invoke(app, ["tasks", "update", "TASK-1", "--priority", "urgentish"])
+    assert bad.exit_code != 0
+    assert "accepted values" in bad.output

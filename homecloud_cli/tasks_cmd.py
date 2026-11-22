@@ -16,6 +16,45 @@ from homecloud_cli.output import emit
 
 _DUE_RELATIVE = re.compile(r"^\+(\d+)([dw]?)$", re.I)
 
+_PRIORITY_LABELS = {"p1": "Critical", "p2": "High", "p3": "Medium", "p4": "Low"}
+_PRIORITY_ALIASES = {
+    "critical": "p1",
+    "urgent": "p1",
+    "high": "p2",
+    "medium": "p3",
+    "normal": "p3",
+    "low": "p4",
+    "קריטי": "p1",
+    "גבוה": "p2",
+    "בינוני": "p3",
+    "נמוך": "p4",
+}
+_PRIORITY_HELP = "Importance: p1 Critical, p2 High, p3 Medium, p4 Low (or 1-4, labels)"
+_PRIORITY_ACCEPTED = "p1..p4, 1..4, critical|urgent, high, medium|normal, low, קריטי|גבוה|בינוני|נמוך"
+
+
+def normalize_priority(raw: str | None) -> str | None:
+    """Map p1..p4, 1..4, English or Hebrew labels to ``pN`` (the stored value)."""
+    if raw is None:
+        return None
+    key = raw.strip().casefold()
+    if key in _PRIORITY_LABELS:
+        return key
+    if key in {"1", "2", "3", "4"}:
+        return f"p{key}"
+    if key in _PRIORITY_ALIASES:
+        return _PRIORITY_ALIASES[key]
+    raise HomeCloudError(f"invalid priority {raw!r}; accepted values: {_PRIORITY_ACCEPTED}")
+
+
+def priority_display(raw: Any) -> str:
+    """``High (p2)`` for known levels; unknown values pass through."""
+    if raw is None or raw == "":
+        return ""
+    key = str(raw).strip().lower()
+    label = _PRIORITY_LABELS.get(key)
+    return f"{label} ({key})" if label else str(raw)
+
 
 def map_jira_issue(issue: dict[str, Any], mapping: dict[str, Any]) -> dict[str, Any]:
     """Map one Jira export issue object to HomeCloud upsert fields."""
@@ -108,7 +147,7 @@ def flatten_task_row(item: dict[str, Any]) -> dict[str, Any]:
         "title": item.get("title"),
         "type": item.get("type"),
         "status": item.get("status"),
-        "priority": item.get("priority"),
+        "priority": priority_display(item.get("priority")),
         "external_id": item.get("external_id") or "",
         "assignee": ", ".join(names) if names else "",
         "labels": ", ".join(label_names) if label_names else "",
@@ -176,6 +215,11 @@ def flatten_activity_row(ev: dict[str, Any]) -> dict[str, Any]:
     actor = ev.get("actor") if isinstance(ev.get("actor"), dict) else {}
     payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
     summary = payload.get("body") or payload.get("comment") or ""
+    if not summary and ev.get("event_type") == "priority_changed":
+        prev = priority_display(payload.get("from") or payload.get("previous"))
+        nxt = priority_display(payload.get("to") or payload.get("new"))
+        if prev or nxt:
+            summary = f"priority: {prev or '-'} -> {nxt or '-'}"
     if not summary and payload:
         summary = ", ".join(f"{k}={v}" for k, v in list(payload.items())[:4])
     return {
@@ -265,7 +309,10 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         assignee: Annotated[Optional[str], typer.Option("--assignee", help="me | user id")] = None,
         watcher: Annotated[Optional[str], typer.Option("--watcher")] = None,
         label: Annotated[Optional[str], typer.Option("--label")] = None,
-        project_id: Annotated[Optional[str], typer.Option("--project-id")] = None,
+        project_id: Annotated[
+            Optional[str],
+            typer.Option("--project-id", "--area-id", "--area", help="Filter by area UUID"),
+        ] = None,
         q: Annotated[Optional[str], typer.Option("--q", help="Smart query string")] = None,
         due: Annotated[Optional[str], typer.Option("--due")] = None,
         mine: Annotated[bool, typer.Option("--mine", help="Shortcut for --assignee me")] = False,
@@ -388,7 +435,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
             Optional[list[str]],
             typer.Option("--assignee", "-a", help="Username, @user, me, or UUID (repeatable)"),
         ] = None,
-        priority: Annotated[Optional[str], typer.Option("--priority")] = None,
+        priority: Annotated[Optional[str], typer.Option("--priority", help=_PRIORITY_HELP)] = None,
         severity: Annotated[Optional[str], typer.Option("--severity")] = None,
         due: Annotated[
             Optional[str],
@@ -409,7 +456,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         ] = None,
         project_id: Annotated[
             Optional[str],
-            typer.Option("--project-id", help="Account project UUID"),
+            typer.Option("--project-id", "--area-id", "--area", help="Account area UUID"),
         ] = None,
         dry_run: Annotated[bool, typer.Option("--dry-run", help="Print planned action only")] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
@@ -419,6 +466,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         try:
             body, auto_fmt = _load_description(description, description_file)
             fmt = description_format or auto_fmt
+            priority = normalize_priority(priority)
             payload = {
                 "action": "create",
                 "title": title,
@@ -474,7 +522,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         ] = None,
         description_format: Annotated[Optional[str], typer.Option("--description-format")] = None,
         assignee: Annotated[Optional[list[str]], typer.Option("--assignee", "-a")] = None,
-        priority: Annotated[Optional[str], typer.Option("--priority")] = None,
+        priority: Annotated[Optional[str], typer.Option("--priority", help=_PRIORITY_HELP)] = None,
         severity: Annotated[Optional[str], typer.Option("--severity")] = None,
         due: Annotated[Optional[str], typer.Option("--due")] = None,
         dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
@@ -499,7 +547,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
             if assignee is not None:
                 fields["assignees"] = assignee
             if priority is not None:
-                fields["priority"] = priority
+                fields["priority"] = normalize_priority(priority)
             if severity is not None:
                 fields["severity"] = severity
             if due is not None:
@@ -781,11 +829,11 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
             if clear_due:
                 fields["clear_due"] = True
             if priority is not None:
-                fields["priority"] = priority
+                fields["priority"] = normalize_priority(priority)
             if severity is not None:
                 fields["severity"] = severity
             if project_id is not None and clear_project:
-                raise HomeCloudError("use either --project-id or --clear-project, not both")
+                raise HomeCloudError("use either --area-id or --clear-area, not both")
             if project_id is not None:
                 fields["project_id"] = project_id
             if clear_project:
@@ -816,14 +864,17 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         clear_assignee: Annotated[bool, typer.Option("--clear-assignee")] = False,
         due: Annotated[Optional[str], typer.Option("--due")] = None,
         clear_due: Annotated[bool, typer.Option("--clear-due")] = False,
-        priority: Annotated[Optional[str], typer.Option("--priority")] = None,
+        priority: Annotated[Optional[str], typer.Option("--priority", help=_PRIORITY_HELP)] = None,
         severity: Annotated[Optional[str], typer.Option("--severity")] = None,
         assign_me: Annotated[bool, typer.Option("--assign-me", help="Assign to yourself")] = False,
         project_id: Annotated[
             Optional[str],
-            typer.Option("--project-id", help="Move task to account project UUID"),
+            typer.Option("--project-id", "--area-id", "--area", help="Move task to account area UUID"),
         ] = None,
-        clear_project: Annotated[bool, typer.Option("--clear-project")] = False,
+        clear_project: Annotated[
+            bool,
+            typer.Option("--clear-project", "--clear-area", help="Remove the task from its area"),
+        ] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
         output: Annotated[str, typer.Option("--output", "-o")] = "json",
     ) -> None:
@@ -868,14 +919,17 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         clear_assignee: Annotated[bool, typer.Option("--clear-assignee")] = False,
         due: Annotated[Optional[str], typer.Option("--due")] = None,
         clear_due: Annotated[bool, typer.Option("--clear-due")] = False,
-        priority: Annotated[Optional[str], typer.Option("--priority")] = None,
+        priority: Annotated[Optional[str], typer.Option("--priority", help=_PRIORITY_HELP)] = None,
         severity: Annotated[Optional[str], typer.Option("--severity")] = None,
         assign_me: Annotated[bool, typer.Option("--assign-me", help="Assign to yourself")] = False,
         project_id: Annotated[
             Optional[str],
-            typer.Option("--project-id", help="Move task to account project UUID"),
+            typer.Option("--project-id", "--area-id", "--area", help="Move task to account area UUID"),
         ] = None,
-        clear_project: Annotated[bool, typer.Option("--clear-project")] = False,
+        clear_project: Annotated[
+            bool,
+            typer.Option("--clear-project", "--clear-area", help="Remove the task from its area"),
+        ] = False,
         profile: Annotated[Optional[str], typer.Option(help="Profile name")] = None,
         output: Annotated[str, typer.Option("--output", "-o")] = "json",
     ) -> None:
