@@ -16,7 +16,7 @@ from homecloud_cli.output import emit
 
 _DUE_RELATIVE = re.compile(r"^\+(\d+)([dw]?)$", re.I)
 
-_PRIORITY_LABELS = {"p1": "Critical", "p2": "High", "p3": "Medium", "p4": "Low"}
+_PRIORITY_LABELS = {"p1": "Critical", "p2": "High", "p3": "Medium", "p4": "Low", "p5": "Lowest"}
 _PRIORITY_ALIASES = {
     "critical": "p1",
     "urgent": "p1",
@@ -24,23 +24,29 @@ _PRIORITY_ALIASES = {
     "medium": "p3",
     "normal": "p3",
     "low": "p4",
+    "lowest": "p5",
+    "very low": "p5",
+    "very_low": "p5",
+    "very-low": "p5",
     "קריטי": "p1",
     "גבוה": "p2",
     "בינוני": "p3",
     "נמוך": "p4",
+    "נמוך מאוד": "p5",
+    "נמוך_מאוד": "p5",
 }
-_PRIORITY_HELP = "Importance: p1 Critical, p2 High, p3 Medium, p4 Low (or 1-4, labels)"
-_PRIORITY_ACCEPTED = "p1..p4, 1..4, critical|urgent, high, medium|normal, low, קריטי|גבוה|בינוני|נמוך"
+_PRIORITY_HELP = "Importance: p1 Critical, p2 High, p3 Medium, p4 Low, p5 Lowest (or 1-5, labels)"
+_PRIORITY_ACCEPTED = "p1..p5, 1..5, critical|urgent, high, medium|normal, low, lowest|very low, קריטי|גבוה|בינוני|נמוך|נמוך מאוד"
 
 
 def normalize_priority(raw: str | None) -> str | None:
-    """Map p1..p4, 1..4, English or Hebrew labels to ``pN`` (the stored value)."""
+    """Map p1..p5, 1..5, English or Hebrew labels to ``pN`` (the stored value)."""
     if raw is None:
         return None
     key = raw.strip().casefold()
     if key in _PRIORITY_LABELS:
         return key
-    if key in {"1", "2", "3", "4"}:
+    if key in {"1", "2", "3", "4", "5"}:
         return f"p{key}"
     if key in _PRIORITY_ALIASES:
         return _PRIORITY_ALIASES[key]
@@ -137,13 +143,24 @@ def parse_due_at(raw: str | None) -> str | None:
     return value
 
 
+def task_ref(item_or_key: Any) -> str:
+    """Display form of a task: the bare number (``57``), never the stored ``TASK-57`` key."""
+    if isinstance(item_or_key, dict):
+        seq = item_or_key.get("sequence")
+        if seq not in (None, ""):
+            return str(seq)
+        item_or_key = item_or_key.get("key")
+    text = str(item_or_key or "").strip()
+    return text[5:] if text.upper().startswith("TASK-") else text
+
+
 def flatten_task_row(item: dict[str, Any]) -> dict[str, Any]:
     assignees = item.get("assignees") or ([] if not item.get("assignee") else [item["assignee"]])
     names = [a.get("username") for a in assignees if isinstance(a, dict) and a.get("username")]
     labels = item.get("labels") or []
     label_names = [lb.get("name") for lb in labels if isinstance(lb, dict) and lb.get("name")]
     return {
-        "key": item.get("key"),
+        "key": task_ref(item) or None,
         "title": item.get("title"),
         "type": item.get("type"),
         "status": item.get("status"),
@@ -393,7 +410,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
 
     @tasks_app.command("get")
     def tasks_get(
-        key: Annotated[str, typer.Argument(help="TASK-12")],
+        key: Annotated[str, typer.Argument(help="Task number, e.g. 12 (TASK-12 also works)")],
         no_mark_seen: Annotated[
             bool,
             typer.Option("--no-mark-seen", help="Do not mark discussion as seen"),
@@ -710,7 +727,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
 
     @tasks_app.command("bulk-delete")
     def tasks_bulk_delete(
-        keys: Annotated[Optional[list[str]], typer.Argument(help="TASK-1 TASK-2 …")] = None,
+        keys: Annotated[Optional[list[str]], typer.Argument(help="Task numbers: 1 2 …")] = None,
         file: Annotated[
             Optional[Path],
             typer.Option("--file", exists=True, readable=True, help="One key per line"),
@@ -763,9 +780,15 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
         """List task-to-task relations."""
         try:
             items = _client(profile).tasks.list_relations(key)
+            fmt = _output_option(output)
+            if fmt == "table":
+                items = [
+                    {**r, "from_key": task_ref(r.get("from_key")), "to_key": task_ref(r.get("to_key"))}
+                    for r in items
+                ]
             emit(
                 items,
-                output_format=_output_option(output),
+                output_format=fmt,
                 columns=["relation_type", "from_key", "to_key", "id"],
             )
         except (HomeCloudError, FileNotFoundError, ValueError) as exc:
@@ -847,7 +870,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
 
     @tasks_app.command("update")
     def tasks_update(
-        key: Annotated[str, typer.Argument(help="TASK-12")],
+        key: Annotated[str, typer.Argument(help="Task number, e.g. 12 (TASK-12 also works)")],
         title: Annotated[Optional[str], typer.Option("--title")] = None,
         description: Annotated[Optional[str], typer.Option("--description", "-d")] = None,
         description_file: Annotated[
@@ -902,7 +925,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
 
     @tasks_app.command("patch")
     def tasks_patch(
-        key: Annotated[str, typer.Argument(help="TASK-12")],
+        key: Annotated[str, typer.Argument(help="Task number, e.g. 12 (TASK-12 also works)")],
         title: Annotated[Optional[str], typer.Option("--title")] = None,
         description: Annotated[Optional[str], typer.Option("--description", "-d")] = None,
         description_file: Annotated[
@@ -1206,7 +1229,7 @@ def register_tasks_commands(tasks_app: typer.Typer) -> None:
             if not yes:
                 raise HomeCloudError("refusing to delete without --yes")
             _client(profile).tasks.delete(key)
-            typer.echo(f"Deleted {key}")
+            typer.echo(f"Deleted {task_ref(key)}")
         except (HomeCloudError, FileNotFoundError, ValueError) as exc:
             _handle_error(exc)
 

@@ -2110,13 +2110,17 @@ def test_normalize_priority() -> None:
     }.items():
         assert normalize_priority(raw) == expected
     with pytest.raises(HomeCloudError, match="accepted values"):
-        normalize_priority("5")
+        normalize_priority("6")
 
 
 def test_priority_labels_in_rows() -> None:
     from homecloud_cli.tasks_cmd import flatten_activity_row, flatten_task_row
 
     assert flatten_task_row({"key": "TASK-1", "priority": "p2"})["priority"] == "High (p2)"
+    assert flatten_task_row({"key": "TASK-1", "priority": "p5"})["priority"] == "Lowest (p5)"
+    # Tables show the bare task number, never TASK-n.
+    assert flatten_task_row({"key": "TASK-1"})["key"] == "1"
+    assert flatten_task_row({"key": "TASK-7", "sequence": 7})["key"] == "7"
     assert flatten_task_row({"key": "TASK-1"})["priority"] == ""
     row = flatten_activity_row(
         {"event_type": "priority_changed", "payload": {"from": "p3", "to": "p1"}}
